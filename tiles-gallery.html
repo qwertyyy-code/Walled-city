@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Walled City tile gallery</title>
+  <style>
+    :root { color-scheme: light; --ink: #2b2118; --paper: #f3ead6; --line: #cbb892; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; background: var(--paper); color: var(--ink); font: 15px/1.4 system-ui, sans-serif; }
+    h1 { margin: 0 0 6px; }
+    .intro { margin: 0 0 16px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+    .legend span { display: flex; align-items: center; gap: 5px; }
+    .legend i { width: 14px; height: 14px; display: inline-block; border: 1px solid #554; border-radius: 50%; }
+    .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+    h2 { margin: 24px 0 8px; }
+    .tile-card { background: rgba(255,255,255,.55); border: 1px solid var(--line); border-radius: 12px; padding: 10px; text-align: center; }
+    .tile-card h2 { margin: 0; font-size: 1rem; }
+    .tile-card p { margin: 2px 0 6px; color: #5c4a36; font-size: .82rem; }
+    .tile-card canvas { display: block; width: 250px; height: 220px; max-width: 100%; margin: auto; }
+  </style>
+</head>
+<body>
+  <h1>Tile gallery</h1>
+  <p class="intro">Full deck: <strong id="deck-total"></strong> tiles, including the start tile.</p>
+  <p class="intro">Every base-game tile type in all four rotations. Edge labels show the game’s edge data; markers show the actual feature meeple positions.</p>
+  <div class="legend" aria-label="Meeple spot legend">
+    <span><i style="background:#c62828"></i>City</span>
+    <span><i style="background:#1565c0"></i>Road</span>
+    <span><i style="background:#75b8d2"></i>River</span>
+    <span><i style="background:#f9a825"></i>Field</span>
+    <span><i style="background:#f3efe4"></i>Monastery</span>
+  </div>
+  <h2>Base tiles</h2>
+  <main id="gallery" class="gallery-grid"></main>
+  <section aria-labelledby="river-heading">
+    <h2 id="river-heading">River</h2>
+    <p class="intro">River section total: <strong id="river-total"></strong> tiles. Every River tile type in all four rotations.</p>
+    <div id="river-gallery" class="gallery-grid"></div>
+  </section>
+  <script src="tiles.js"></script>
+  <script src="render.js"></script>
+  <script>
+    const gallery = document.getElementById("gallery");
+    const riverGallery = document.getElementById("river-gallery");
+    const tileTotal = Object.keys(TILE_TYPES).reduce(function (total, id) {
+      return total + TILE_TYPES[id].count;
+    }, 0);
+    document.getElementById("deck-total").textContent = tileTotal;
+    const riverTotal = Object.keys(RIVER_TILE_TYPES).reduce(function (total, id) {
+      return total + RIVER_TILE_TYPES[id].count;
+    }, 0);
+    document.getElementById("river-total").textContent = riverTotal;
+    const directions = [
+      { edge: N, label: "N", x: 125, y: 12, align: "center" },
+      { edge: E, label: "E", x: 218, y: 112, align: "left" },
+      { edge: S, label: "S", x: 125, y: 216, align: "center" },
+      { edge: W, label: "W", x: 32, y: 112, align: "right" }
+    ];
+    const spotColors = {
+      city: "#c62828",
+      road: "#1565c0",
+      river: "#75b8d2",
+      field: "#f9a825",
+      monastery: "#f3efe4"
+    };
+    function edgeName(edge) {
+      if (edge === CITY) return "C";
+      if (edge === ROAD) return "R";
+      if (edge === RIVER) return "River";
+      return "F";
+    }
+
+    function featuresForTile(spec) {
+      const features = [];
+      spec.cities.forEach(function (feature) {
+        features.push({ kind: "city", feature: feature });
+      });
+      spec.roads.forEach(function (feature) {
+        features.push({ kind: "road", feature: feature });
+      });
+      spec.fields.forEach(function (feature) {
+        features.push({ kind: "field", feature: feature });
+      });
+      if (spec.monastery) {
+        features.push({ kind: "monastery", feature: { anchor: spec.monasteryAnchor } });
+      }
+      return features;
+    }
+
+    function fieldNumber(typeId, index) {
+      if (typeId === "river-city-corner") return index === 0 ? 2 : 1;
+      return index + 1;
+    }
+
+    function renderTiles(types, container) {
+      Object.keys(types).forEach(function (id) {
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(id, rot);
+          const card = document.createElement("section");
+          card.className = "tile-card";
+          const title = document.createElement("h2");
+          title.textContent = "Tile " + id + " — " + (rot * 90) + "°";
+          const subtitle = document.createElement("p");
+          subtitle.textContent = "Copies: " + types[id].count
+            + " · Field areas: " + spec.fields.length
+            + " · Edges: " + spec.edges.map(edgeName).join(" · ");
+          const fieldLinks = document.createElement("p");
+          fieldLinks.textContent = spec.fields.map(function (field, index) {
+            const cityNames = field.cityAreas.map(function (cityIndex) {
+              return "city " + String.fromCharCode(65 + cityIndex);
+            });
+            return "Field " + fieldNumber(id, index) + " touches "
+              + (cityNames.length ? cityNames.join(" and ") : "no city");
+          }).join(" · ") || "No fields";
+          const canvas = document.createElement("canvas");
+          canvas.width = 250;
+          canvas.height = 220;
+          const ctx = canvas.getContext("2d");
+          ctx.save();
+          ctx.translate(35, 20);
+          paintTile(ctx, id, rot, 180, false);
+          featuresForTile(spec).forEach(function (entry) {
+            const anchor = featureAnchor(entry.kind, entry.feature);
+            drawMeeple(
+              ctx,
+              anchor.x * 180,
+              anchor.y * 180,
+              20,
+              spotColors[entry.kind]
+            );
+          });
+          spec.fields.forEach(function (feature, index) {
+            const anchor = featureAnchor("field", feature);
+            const x = anchor.x * 180 + 11;
+            const y = anchor.y * 180 - 11;
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.fillStyle = "#2b2118";
+            ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = spotColors.field;
+            ctx.stroke();
+            ctx.fillStyle = "#fff";
+            ctx.font = "bold 10px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(fieldNumber(id, index)), x, y);
+          });
+          ctx.restore();
+
+          directions.forEach(function (direction) {
+            ctx.fillStyle = "#2b2118";
+            ctx.font = "bold 12px system-ui, sans-serif";
+            ctx.textAlign = direction.align;
+            const edge = spec.edges[direction.edge];
+            ctx.fillText(direction.label + ":" + edgeName(edge), direction.x, direction.y);
+          });
+          card.appendChild(title);
+          card.appendChild(subtitle);
+          card.appendChild(fieldLinks);
+          card.appendChild(canvas);
+          container.appendChild(card);
+        }
+      });
+    }
+
+    renderTiles(TILE_TYPES, gallery);
+    renderTiles(RIVER_TILE_TYPES, riverGallery);
+  </script>
+</body>
+</html>

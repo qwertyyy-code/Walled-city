@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#3e3226">
+  <title>Walled City</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="./icon-192.png">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="start-screen" class="screen active">
+    <div class="hero">
+      <h1>Walled City</h1>
+      <p>Pass-and-play tile laying. Offline after the first load. Base-game scoring included.</p>
+    </div>
+    <div class="stack">
+      <label class="row">Players
+        <span class="stepper">
+          <button type="button" id="p-minus">−</button>
+          <strong id="p-count">2</strong>
+          <button type="button" id="p-plus">+</button>
+        </span>
+      </label>
+      <div id="player-fields" class="players"></div>
+      <label class="river-option">
+        <input type="checkbox" id="river-option">
+        <span>Play with the River (12 tiles)</span>
+      </label>
+      <button type="button" class="btn" id="btn-new">New game</button>
+      <section class="scoring-rules" aria-labelledby="scoring-title">
+        <h2 id="scoring-title">Scoring</h2>
+        <h3>During the game</h3>
+        <p>Road: when both ends are closed, 1 point per tile.</p>
+        <p>City: when its walls are closed, 2 points per tile and 2 per pennant. A city of only <span id="small-city-tile-limit"></span> tiles scores <span id="small-city-points"></span> points.</p>
+        <p>Monastery: when all 8 squares around it are filled, 9 points.</p>
+        <p>Whoever has the most meeples on a road or city scores it. Tied players all score in full. The meeples then go back to their owners.</p>
+        <h3>End of the game</h3>
+        <p>Unfinished road: 1 point per tile.</p>
+        <p>Unfinished city: 1 point per tile and 1 per pennant.</p>
+        <p>Unfinished monastery: 1 point, plus 1 for each tile around it.</p>
+        <p>Farmers: for each completed city, the player with the most farmers in the fields touching it scores <span id="farmer-points"></span> points. Tied players each score <span id="farmer-tied-points"></span>.</p>
+        <p>Farmers stay on the board until the end of the game.</p>
+        <p id="river-scoring-rule" hidden>River: the river never scores. Meeples can't stand on the river, but can go on everything else on a river tile.</p>
+      </section>
+      <button type="button" class="btn ghost" id="btn-resume" disabled>Resume game</button>
+    </div>
+  </div>
+
+  <div id="handoff-screen" class="screen">
+    <div class="handoff" id="handoff-tap">
+      <div id="handoff-dot" class="dot"></div>
+      <h2 id="handoff-title">Your turn</h2>
+      <p>Tap when you have the phone. The next tile stays hidden until then.</p>
+      <section class="score-panel">
+        <h3>Scores</h3>
+        <div id="handoff-scoreboard" class="scoreboard"></div>
+      </section>
+      <section class="turn-log">
+        <h3>Last turn</h3>
+        <div id="handoff-log" aria-live="polite"></div>
+      </section>
+      <button type="button" class="btn ghost" id="btn-handoff-undo" hidden>Undo last turn</button>
+    </div>
+  </div>
+
+  <div id="play-screen" class="screen">
+    <div class="board-wrap">
+      <canvas id="board"></canvas>
+      <div class="zoom-btns">
+        <button type="button" id="zoom-in">+</button>
+        <button type="button" id="zoom-out">−</button>
+        <button type="button" id="zoom-fit">⌂</button>
+      </div>
+    </div>
+    <div class="hud">
+      <div class="hud-top">
+        <div id="turn-label"></div>
+        <div id="tiles-left"></div>
+      </div>
+      <div id="play-scoreboard" class="scoreboard compact"></div>
+      <div class="meeple-row" id="meeple-row"></div>
+      <div class="hint" id="hint"></div>
+      <div class="controls">
+        <canvas id="preview" width="144" height="144"></canvas>
+        <button type="button" class="btn warn" id="btn-rotate">Rotate</button>
+        <button type="button" class="btn ghost" id="btn-undo">Undo</button>
+      </div>
+      <button type="button" class="btn ok" id="btn-confirm" disabled>Confirm</button>
+      <button type="button" class="btn ghost" id="btn-back-results" hidden>Back to results</button>
+    </div>
+  </div>
+
+  <div id="end-screen" class="screen">
+    <div class="banner">
+      <h1>No tiles left</h1>
+      <p id="end-summary"></p>
+    </div>
+    <section class="score-panel end-scores">
+      <h2>Final scores</h2>
+      <p class="score-note">Roads, cities, monasteries, and farms show end-game points. Total includes points scored during play.</p>
+      <div id="end-scoreboard" class="scoreboard"></div>
+    </section>
+    <section class="turn-log end-log">
+      <h3>Final scoring</h3>
+      <div id="end-log" aria-live="polite"></div>
+    </section>
+    <div class="stack">
+      <button type="button" class="btn ghost" id="btn-end-undo" hidden>Undo last turn</button>
+      <button type="button" class="btn" id="btn-view-board">View board</button>
+      <button type="button" class="btn ghost" id="btn-home">New game</button>
+    </div>
+  </div>
+
+  <button type="button" id="update-notice" class="update-notice" hidden>
+    New version, tap to reload
+  </button>
+  <script src="./tiles.js"></script>
+  <script src="./game.js"></script>
+  <script src="./render.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

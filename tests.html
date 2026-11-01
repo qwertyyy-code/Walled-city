@@ -1,0 +1,2170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Walled City game tests</title>
+  <style>
+    body { max-width: 760px; margin: 32px auto; padding: 0 16px; font: 16px/1.5 system-ui, sans-serif; color: #2b2118; }
+    li { margin: 8px 0; }
+    .pass { color: #2e7d32; }
+    .fail { color: #b71c1c; }
+    code { background: #f3ead6; padding: 2px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Game checks</h1>
+  <p>These checks cover tile placement, River rules, feature completion, majority ties, meeple return, and end-game scoring.</p>
+  <ol id="results"></ol>
+  <p id="summary" aria-live="polite"></p>
+  <script src="tiles.js"></script>
+  <script src="game.js"></script>
+  <script src="render.js"></script>
+  <script>
+    const results = document.getElementById("results");
+    let passed = 0;
+    let failed = 0;
+
+    function assertEqual(actual, expected, message) {
+      if (actual !== expected) {
+        throw new Error(message + ": expected " + expected + ", got " + actual);
+      }
+    }
+
+    function test(name, fn) {
+      const item = document.createElement("li");
+      try {
+        fn();
+        passed += 1;
+        item.className = "pass";
+        item.textContent = "PASS — " + name;
+      } catch (error) {
+        failed += 1;
+        item.className = "fail";
+        item.textContent = "FAIL — " + name + ": " + error.message;
+      }
+      results.appendChild(item);
+    }
+
+    function testState() {
+      const state = emptyState();
+      state.players = [
+        { name: "Red", color: "#c62828", meeples: 7, score: 0, endGamePoints: { roads: 0, cities: 0, monasteries: 0, farms: 0 } },
+        { name: "Blue", color: "#1565c0", meeples: 7, score: 0, endGamePoints: { roads: 0, cities: 0, monasteries: 0, farms: 0 } }
+      ];
+      return state;
+    }
+
+    function put(state, x, y, typeId, rot, meeple) {
+      state.board[keyXY(x, y)] = {
+        uid: typeId + "-" + x + "-" + y,
+        typeId: typeId,
+        rot: rot || 0,
+        meeple: meeple || null
+      };
+    }
+
+    function meeple(player, kind, index) {
+      return { player: player, kind: kind, index: index };
+    }
+
+    function testDrawnSpotTap(typeId, rot, kind, index) {
+      const state = testState();
+      if (typeId === "river-spring") {
+        state.phase = "meeple";
+        state.placed = { x: 0, y: 0 };
+        put(state, 0, 0, typeId, rot);
+        const springSpec = rotatedType(typeId, rot);
+        const springFeature = springSpec.fields[index];
+        const springAnchor = featureAnchor(kind, springFeature);
+        const springHit = meepleSpotAt(
+          meepleOptions(state),
+          springSpec,
+          springAnchor.x,
+          springAnchor.y,
+          1
+        );
+        assertEqual(springHit && springHit.kind, kind, "drawn " + kind + " spot resolves to " + kind);
+        assertEqual(springHit && springHit.index, index, "drawn spot resolves to feature " + index);
+        assertEqual(placeMeeple(state, springHit.kind, springHit.index), true, "place meeple on tapped " + kind);
+        assertEqual(state.board["0,0"].meeple.kind, kind, "meeple is stored on " + kind);
+        assertEqual(state.board["0,0"].meeple.index, index, "meeple feature index");
+        return;
+      }
+      state.deck = [{ uid: "next", typeId: "B" }];
+      state.phase = "place";
+      state.currentTile = { uid: "tap-test", typeId: typeId, rot: rot };
+      const spec = rotatedType(typeId, rot);
+      if (RIVER_TILE_TYPES[typeId]) {
+        const incomingEdge = spec.edges.indexOf(RIVER);
+        const previousEdge = OPPOSITE[incomingEdge];
+        let previousRotation = 0;
+        while (rotatedType("river-spring", previousRotation).edges[previousEdge] !== RIVER) {
+          previousRotation += 1;
+        }
+        state.riverEnabled = true;
+        state.riverOpenEnd = { x: 0, y: 0, incomingEdge: incomingEdge };
+        state.riverLastTurn = null;
+        put(
+          state,
+          DIR_DELTA[incomingEdge].x,
+          DIR_DELTA[incomingEdge].y,
+          "river-spring",
+          previousRotation
+        );
+      } else {
+        spec.edges.forEach(function (edgeType, edge) {
+          let match = null;
+          Object.keys(TILE_TYPES).some(function (neighborType) {
+            for (let neighborRotation = 0; neighborRotation < 4; neighborRotation++) {
+              if (rotatedType(neighborType, neighborRotation).edges[OPPOSITE[edge]] === edgeType) {
+                match = { typeId: neighborType, rot: neighborRotation };
+                return true;
+              }
+            }
+            return false;
+          });
+          if (!match) throw new Error("no matching neighbor for edge " + edge);
+          put(state, DIR_DELTA[edge].x, DIR_DELTA[edge].y, match.typeId, match.rot);
+        });
+      }
+      assertEqual(selectPending(state, 0, 0), true, "select legal pending tile");
+      const feature = kind === "monastery" ? { anchor: spec.monasteryAnchor } : spec.fields[index];
+      const anchor = featureAnchor(kind, feature);
+      const hit = meepleSpotAt(pendingMeepleOptions(state), spec, anchor.x, anchor.y, 1);
+      assertEqual(hit && hit.kind, kind, "drawn " + kind + " spot resolves to " + kind);
+      assertEqual(hit && hit.index, index, "drawn spot resolves to feature " + index);
+      assertEqual(selectPendingMeeple(state, hit.kind, hit.index), true, "select tapped " + kind);
+      assertEqual(confirmPending(state), true, "confirm the selected spot");
+      assertEqual(boardTile(state, 0, 0).meeple.kind, kind, "meeple is stored on " + kind);
+      assertEqual(boardTile(state, 0, 0).meeple.index, index, "meeple feature index");
+    }
+
+    function riverAnchorPixel(typeId, rot, anchor) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 160;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      paintTile(ctx, typeId, rot, 160, false);
+      return ctx.getImageData(
+        Math.round(anchor.x * canvas.width),
+        Math.round(anchor.y * canvas.height),
+        1,
+        1
+      ).data;
+    }
+
+    function riverFieldAnchorIsGrass(typeId, rot, index) {
+      const anchor = featureAnchor("field", rotatedType(typeId, rot).fields[index]);
+      const pixel = riverAnchorPixel(typeId, rot, anchor);
+      return pixel[1] > pixel[0] && pixel[1] > pixel[2];
+    }
+
+    function isGrassPixel(data, pixel) {
+      const baseGrass = Math.abs(data[pixel] - 106) <= 12
+        && Math.abs(data[pixel + 1] - 166) <= 12
+        && Math.abs(data[pixel + 2] - 58) <= 12;
+      const shadedGrass = Math.abs(data[pixel] - 101) <= 12
+        && Math.abs(data[pixel + 1] - 159) <= 12
+        && Math.abs(data[pixel + 2] - 55) <= 12;
+      return data[pixel + 3] > 200 && (baseGrass || shadedGrass);
+    }
+
+    function grassFlood(anchor, canvas, imageData) {
+      const width = canvas.width;
+      const height = canvas.height;
+      const startX = Math.round(anchor.x * width);
+      const startY = Math.round(anchor.y * height);
+      const start = startY * width + startX;
+      const data = imageData.data;
+      const visited = new Uint8Array(width * height);
+      const queue = new Int32Array(width * height);
+      let head = 0;
+      let tail = 0;
+      if (!isGrassPixel(data, start * 4)) return null;
+      visited[start] = 1;
+      queue[tail++] = start;
+      while (head < tail) {
+        const index = queue[head++];
+        const x = index % width;
+        const candidates = [
+          x > 0 ? index - 1 : -1,
+          x + 1 < width ? index + 1 : -1,
+          index >= width ? index - width : -1,
+          index + width < width * height ? index + width : -1
+        ];
+        candidates.forEach(function (next) {
+          if (next >= 0 && !visited[next] && isGrassPixel(data, next * 4)) {
+            visited[next] = 1;
+            queue[tail++] = next;
+          }
+        });
+      }
+      return visited;
+    }
+
+    function grassHalfEdgePixel(slot, size) {
+      const point = slotPos(slot);
+      const interior = inward(point, 0.01);
+      return [Math.round(interior.x * size), Math.round(interior.y * size)];
+    }
+
+    function grassRegionResults(typeId, rot) {
+      const size = 128;
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      paintTile(ctx, typeId, rot, size, false);
+      const imageData = ctx.getImageData(0, 0, size, size);
+      const spec = rotatedType(typeId, rot);
+      const reachedByField = spec.fields.map(function (field) {
+        const anchor = featureAnchor("field", field);
+        const visited = grassFlood(anchor, canvas, imageData);
+        if (!visited) return { slots: [], error: "spot is not on grass" };
+        const slots = [];
+        for (let slot = 0; slot < 8; slot++) {
+          const point = grassHalfEdgePixel(slot, size);
+          if (visited[point[1] * size + point[0]]) slots.push(slot);
+        }
+        return { slots: slots, visited: visited };
+      });
+      const fieldsWithSlots = new Set();
+      reachedByField.forEach(function (entry) {
+        entry.slots.forEach(function (slot) {
+          fieldsWithSlots.add(slot);
+        });
+      });
+      const mismatches = [];
+      spec.fields.forEach(function (field, fieldIndex) {
+        const reached = reachedByField[fieldIndex];
+        const expected = field.slots.slice().sort(function (a, b) { return a - b; });
+        const actual = reached.slots.slice().sort(function (a, b) { return a - b; });
+        if (reached.error || JSON.stringify(actual) !== JSON.stringify(expected)) {
+          mismatches.push("field " + (fieldIndex + 1) + " expected ["
+            + expected.join(",") + "] got " + (reached.error || "[" + actual.join(",") + "]"));
+        }
+      });
+      for (let slot = 0; slot < 8; slot++) {
+        const point = grassHalfEdgePixel(slot, size);
+        const index = point[1] * size + point[0];
+        const pixel = index * 4;
+        if (!isGrassPixel(imageData.data, pixel)) continue;
+        if (!fieldsWithSlots.has(slot)) mismatches.push("unclaimed grass half-edge " + slot);
+      }
+
+      const components = new Uint16Array(size * size);
+      let componentCount = 0;
+      for (let index = 0; index < size * size; index++) {
+        const pixel = index * 4;
+        if (components[index] || !isGrassPixel(imageData.data, pixel)) continue;
+        componentCount++;
+        const componentId = componentCount;
+        const queue = new Int32Array(size * size);
+        let head = 0;
+        let tail = 0;
+        components[index] = componentId;
+        queue[tail++] = index;
+        while (head < tail) {
+          const current = queue[head++];
+          const x = current % size;
+          const candidates = [
+            x > 0 ? current - 1 : -1,
+            x + 1 < size ? current + 1 : -1,
+            current >= size ? current - size : -1,
+            current + size < size * size ? current + size : -1
+          ];
+          candidates.forEach(function (next) {
+            if (next < 0 || components[next]) return;
+            if (isGrassPixel(imageData.data, next * 4)) {
+              components[next] = componentId;
+              queue[tail++] = next;
+            }
+          });
+        }
+      }
+      if (componentCount !== spec.fields.length) {
+        mismatches.push("drawn grass components " + componentCount
+          + " != field spots " + spec.fields.length);
+      }
+      const anchoredComponents = new Set(spec.fields.map(function (field) {
+        const anchor = featureAnchor("field", field);
+        const x = Math.round(anchor.x * size);
+        const y = Math.round(anchor.y * size);
+        return components[y * size + x];
+      }).filter(Boolean));
+      if (anchoredComponents.size !== spec.fields.length) {
+        mismatches.push("grass components with distinct field spots " + anchoredComponents.size
+          + " != " + spec.fields.length);
+      }
+      return mismatches;
+    }
+
+    [TILE_TYPES, RIVER_TILE_TYPES].forEach(function (types) {
+      Object.keys(types).forEach(function (typeId) {
+        for (let rot = 0; rot < 4; rot++) {
+          test(typeId + " rotation " + rot + " grass regions match field data", function () {
+            const mismatches = grassRegionResults(typeId, rot);
+            assertEqual(mismatches.length, 0, mismatches.join("; "));
+          });
+        }
+      });
+    });
+
+    Object.keys(RIVER_TILE_TYPES).forEach(function (typeId) {
+      for (let rot = 0; rot < 4; rot++) {
+        test(typeId + " rotation " + rot + " field spots tap their own grass areas", function () {
+          const state = testState();
+          state.phase = "meeple";
+          state.placed = { x: 0, y: 0 };
+          put(state, 0, 0, typeId, rot);
+          const spec = rotatedType(typeId, rot);
+          const fieldOptions = meepleOptions(state).filter(function (option) {
+            return option.kind === "field";
+          });
+          assertEqual(fieldOptions.length, spec.fields.length, "one field spot per area");
+          spec.fields.forEach(function (field, index) {
+            testDrawnSpotTap(typeId, rot, "field", index);
+          });
+          const offGrass = [];
+          spec.fields.forEach(function (field, index) {
+            if (!riverFieldAnchorIsGrass(typeId, rot, index)) offGrass.push(index + 1);
+          });
+          assertEqual(offGrass.length, 0, "field spot(s) " + offGrass.join(", ") + " are not drawn on grass");
+          const spots = [];
+          spec.cities.forEach(function (feature) {
+            spots.push(featureAnchor("city", feature));
+          });
+          spec.roads.forEach(function (feature) {
+            spots.push(featureAnchor("road", feature));
+          });
+          if (spec.monastery) spots.push(featureAnchor("monastery", { anchor: spec.monasteryAnchor }));
+          spec.fields.forEach(function (feature) {
+            spots.push(featureAnchor("field", feature));
+          });
+          const onRiver = spots.filter(function (anchor) {
+            const pixel = riverAnchorPixel(typeId, rot, anchor);
+            return pixel[2] > pixel[1] && pixel[2] > pixel[0];
+          });
+          assertEqual(onRiver.length, 0, onRiver.length + " meeple spot(s) are on the river");
+          for (let i = 0; i < spots.length; i++) {
+            for (let j = i + 1; j < spots.length; j++) {
+              assertEqual(
+                Math.hypot(spots[i].x - spots[j].x, spots[i].y - spots[j].y) < 0.22,
+                false,
+                "meeple spots are at least one meeple width apart"
+              );
+            }
+          }
+        });
+      }
+    });
+
+    test("river-curve-road fields use their three grass regions", function () {
+      const fields = RIVER_TILE_TYPES["river-curve-road"].fields.map(function (field) {
+        return field.slots.slice().sort(function (a, b) { return a - b; });
+      });
+      assertEqual(
+        JSON.stringify(fields),
+        JSON.stringify([[0, 3, 4, 7], [1, 2], [5, 6]]),
+        "field half-edge groups"
+      );
+    });
+
+    for (let rot = 0; rot < 4; rot++) {
+      test("river-curve-road rotation " + rot + " road spot is centered on the road", function () {
+        const spec = rotatedType("river-curve-road", rot);
+        const anchor = featureAnchor("road", spec.roads[0]);
+        const pixel = riverAnchorPixel("river-curve-road", rot, anchor);
+        assertEqual(
+          Array.from(pixel).slice(0, 3).join(","),
+          "234,215,166",
+          "road spot pixel matches the road center"
+        );
+      });
+    }
+
+    ["A", "B"].forEach(function (typeId) {
+      for (let rot = 0; rot < 4; rot++) {
+        test("monastery " + typeId + " rotation " + rot + " selecting its spot and confirming claims monastery", function () {
+          testDrawnSpotTap(typeId, rot, "monastery", 0);
+        });
+        test("monastery " + typeId + " rotation " + rot + " selecting its field spot and confirming claims field", function () {
+          testDrawnSpotTap(typeId, rot, "field", 0);
+        });
+      }
+    });
+
+    test("all tile meeple spots are at least one marker width apart in every rotation", function () {
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(typeId, rot);
+          const spots = [];
+          spec.cities.forEach(function (feature, index) {
+            spots.push({ kind: "city", index: index, feature: feature });
+          });
+          spec.roads.forEach(function (feature, index) {
+            spots.push({ kind: "road", index: index, feature: feature });
+          });
+          if (spec.monastery) spots.push({ kind: "monastery", index: 0, feature: {} });
+          spec.fields.forEach(function (feature, index) {
+            spots.push({ kind: "field", index: index, feature: feature });
+          });
+          const anchors = spots.map(function (spot) {
+            return {
+              kind: spot.kind,
+              index: spot.index,
+              point: featureAnchor(spot.kind, spot.feature)
+            };
+          });
+          for (let i = 0; i < anchors.length; i++) {
+            for (let j = i + 1; j < anchors.length; j++) {
+              const distance = Math.hypot(
+                anchors[i].point.x - anchors[j].point.x,
+                anchors[i].point.y - anchors[j].point.y
+              );
+              assertEqual(
+                distance < 0.22,
+                false,
+                typeId + " rotation " + rot + " spots " + anchors[i].kind + anchors[i].index
+                  + " and " + anchors[j].kind + anchors[j].index + " overlap"
+              );
+            }
+          }
+        }
+      });
+    });
+
+    function monasteryTurnState(typeId, missingX, missingY) {
+      const state = testState();
+      state.current = 1;
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "monastery", typeId: typeId },
+        { uid: "finisher", typeId: "B" },
+        { uid: "spare", typeId: "B" }
+      ];
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          if ((!x && !y) || (x === missingX && y === missingY)) continue;
+          if (typeId === "A" && x === 1 && y === 0) put(state, x, y, "A", 1);
+          else put(state, x, y, "B", 0);
+        }
+      }
+
+      beginTurn(state);
+      const monasteryRot = typeId === "A" ? 3 : 0;
+      state.currentTile.rot = monasteryRot;
+      assertEqual(selectPending(state, 0, 0), true, "place monastery tile pending");
+      assertEqual(selectPendingMeeple(state, "monastery", 0), true, "select monastery meeple");
+      assertEqual(confirmPending(state), true, "confirm monastery turn");
+      assertEqual(state.players[1].score, 0, "monastery remains unfinished");
+      assertEqual(state.players[1].meeples, 6, "meeple remains on unfinished monastery");
+      return state;
+    }
+
+    function completeMonasteryOnFollowingTurn(typeId, missingX, missingY) {
+      const state = monasteryTurnState(typeId, missingX, missingY);
+      beginTurn(state);
+      assertEqual(state.current, 0, "other player takes the next turn");
+      assertEqual(selectPending(state, missingX, missingY), true, "place final surrounding tile pending");
+      assertEqual(confirmPending(state), true, "confirm finishing turn");
+      assertEqual(state.players[1].score, 9, "Blue receives nine monastery points");
+      assertEqual(state.players[1].meeples, 7, "Blue gets monastery meeple back");
+      assertEqual(state.board["0,0"].meeple, null, "meeple removed from the board");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("completed monastery") !== -1;
+      }), true, "monastery completion appears in turn log");
+    }
+
+    function completeNewMonasteryInHole(typeId) {
+      const state = testState();
+      state.current = 1;
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "monastery", typeId: typeId },
+        { uid: "spare-one", typeId: "B" },
+        { uid: "spare-two", typeId: "B" }
+      ];
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          if (!x && !y) continue;
+          if (typeId === "A" && x === 1 && y === 0) put(state, x, y, "A", 1);
+          else put(state, x, y, "B", 0);
+        }
+      }
+      beginTurn(state);
+      state.currentTile.rot = typeId === "A" ? 3 : 0;
+      assertEqual(selectPending(state, 0, 0), true, "place monastery in surrounded hole");
+      assertEqual(selectPendingMeeple(state, "monastery", 0), true, "select completed monastery");
+      assertEqual(confirmPending(state), true, "confirm monastery turn");
+      assertEqual(state.players[1].score, 9, "Blue receives nine monastery points");
+      assertEqual(state.players[1].meeples, 7, "Blue gets monastery meeple back");
+      assertEqual(state.board["0,0"].meeple, null, "meeple removed from the board");
+    }
+
+    ["A", "B"].forEach(function (typeId) {
+      test("monastery " + typeId + " scores when completed by an adjacent tile on the next turn", function () {
+        completeMonasteryOnFollowingTurn(typeId, 0, -1);
+      });
+
+      test("monastery " + typeId + " scores when completed by a diagonal tile on the next turn", function () {
+        completeMonasteryOnFollowingTurn(typeId, 1, -1);
+      });
+
+      test("monastery " + typeId + " scores when placed into a surrounded hole", function () {
+        completeNewMonasteryInHole(typeId);
+      });
+    });
+
+    test("horizontal pennant city tile rejects city contact below and accepts city contacts left and right", function () {
+      const state = testState();
+      put(state, 0, -1, "E", 2);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 0 };
+
+      assertEqual(canPlaceAt(state, "F", 0, 0, 0), false, "tile cannot meet city below via field edge");
+      assertEqual(placeCurrent(state, 0, 0), false, "reject invalid placement below city");
+
+      const betweenCities = testState();
+      put(betweenCities, -1, 0, "E", 1);
+      put(betweenCities, 1, 0, "E", 3);
+      betweenCities.phase = "place";
+      betweenCities.currentTile = { uid: "F-test", typeId: "F", rot: 0 };
+      assertEqual(canPlaceAt(betweenCities, "F", 0, 0, 0), true, "tile fits between city edges left and right");
+      assertEqual(placeCurrent(betweenCities, 0, 0), true, "accept horizontal city connections");
+    });
+
+    test("pennant tile F draws a horizontal city strip with a field meeple spot on each side", function () {
+      const spec = rotatedType("F", 0);
+      const canvas = document.createElement("canvas");
+      canvas.width = 220;
+      canvas.height = 220;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.translate(20, 20);
+      paintTile(ctx, "F", 0, 180, false);
+
+      function pixelColor(x, y) {
+        return Array.from(ctx.getImageData(x + 20, y + 20, 1, 1).data).slice(0, 3).join(",");
+      }
+
+      assertEqual(pixelColor(15, 90), "181,107,58", "city band reaches left and right");
+      assertEqual(pixelColor(90, 15), "106,166,58", "top side is field, not city");
+
+      const features = [
+        { kind: "city", feature: spec.cities[0] },
+        { kind: "field", feature: spec.fields[0] },
+        { kind: "field", feature: spec.fields[1] }
+      ];
+      const spots = features.map(function (entry) {
+        return { kind: entry.kind, point: featureAnchor(entry.kind, entry.feature) };
+      });
+      assertEqual(spots.filter(function (spot) { return spot.kind === "city"; }).length, 1, "one city spot");
+      assertEqual(spots.filter(function (spot) { return spot.kind === "field"; }).length, 2, "two field spots");
+      assertEqual(spots[0].point.x, 0.5, "city spot is centered");
+      assertEqual(spots[1].point.y < spots[0].point.y, true, "top field spot sits above city");
+      assertEqual(spots[2].point.y > spots[0].point.y, true, "bottom field spot sits below city");
+    });
+
+    test("city strip tiles F and G draw city bands on their data edges in every rotation", function () {
+      ["F", "G"].forEach(function (typeId) {
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(typeId, rot);
+          const horizontal = spec.cities[0].edges.indexOf(E) !== -1;
+          const canvas = document.createElement("canvas");
+          canvas.width = 220;
+          canvas.height = 220;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          ctx.translate(20, 20);
+          paintTile(ctx, typeId, rot, 180, false);
+          function colorAt(x, y) {
+            return Array.from(ctx.getImageData(x + 20, y + 20, 1, 1).data).slice(0, 3).join(",");
+          }
+          const leftColor = colorAt(15, 90);
+          const topColor = colorAt(90, 15);
+          assertEqual(leftColor === "181,107,58", horizontal, typeId + " left edge at rotation " + rot);
+          assertEqual(topColor === "181,107,58", !horizontal, typeId + " top edge at rotation " + rot);
+          assertEqual(spec.cities.length, 1, typeId + " city feature count");
+          assertEqual(spec.fields.length, 2, typeId + " field feature count");
+        }
+      });
+    });
+
+    test("all tile city edges are drawn at their coded edges in all rotations", function () {
+      const canvas = document.createElement("canvas");
+      canvas.width = 220;
+      canvas.height = 220;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const edgePoints = [
+        { x: 110, y: 28 },
+        { x: 192, y: 110 },
+        { x: 110, y: 192 },
+        { x: 28, y: 110 }
+      ];
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        for (let rot = 0; rot < 4; rot++) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.translate(20, 20);
+          paintTile(ctx, typeId, rot, 180, false);
+          const spec = rotatedType(typeId, rot);
+          spec.cities.forEach(function (city) {
+            city.edges.forEach(function (edge) {
+              const point = edgePoints[edge];
+              const pixel = ctx.getImageData(point.x, point.y, 1, 1).data;
+              const color = Array.from(pixel).slice(0, 3).join(",");
+              assertEqual(color, "181,107,58", typeId + " city edge " + edge + " at rotation " + rot);
+            });
+          });
+        }
+      });
+    });
+
+    function monasteryCompletionState(typeId, lastX, lastY) {
+      const state = testState();
+      state.current = 1;
+      state.deck = [{ uid: "next", typeId: "B" }];
+      put(state, 0, 0, typeId, 0);
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          if ((!x && !y) || (x === lastX && y === lastY)) continue;
+          if (typeId === "A" && x === 0 && y === 1) put(state, x, y, "A", 2);
+          else put(state, x, y, "B", 0);
+        }
+      }
+      state.phase = "meeple";
+      state.placed = { x: 0, y: 0 };
+      assertEqual(placeMeeple(state, "monastery", 0), true, "place meeple on monastery");
+      assertEqual(state.board["0,0"].meeple.kind, "monastery", "meeple feature kind");
+      state.phase = "place";
+      state.placed = null;
+      state.meeplePicked = false;
+      state.currentTile = { uid: "last-tile", typeId: "B", rot: 0 };
+      return state;
+    }
+
+    function assertMonasteryScored(state) {
+      assertEqual(state.players[1].score, 9, "Blue's completed monastery score");
+      assertEqual(state.players[1].meeples, 7, "Blue's returned meeple");
+      assertEqual(state.board["0,0"].meeple, null, "meeple removed from completed monastery");
+      assertEqual(validateBoard(state).length, 0, "fixture board edges match");
+      assertEqual(state.phase, "handoff", "turn continues after scoring");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("completed monastery") !== -1;
+      }), true, "completion logged");
+    }
+
+    function finishByPlacingAdjacentTile(typeId, lastX, lastY) {
+      const state = monasteryCompletionState(typeId, lastX, lastY);
+      assertEqual(selectPending(state, lastX, lastY), true, "place final neighbouring tile pending");
+      assertEqual(confirmPending(state), true, "confirm final neighbouring tile");
+      return state;
+    }
+
+    function finishByPlacingMonastery(typeId) {
+      const state = testState();
+      state.current = 1;
+      state.deck = [{ uid: "next", typeId: "B" }];
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          if (x === 0 && y === 0) continue;
+          if (typeId === "A" && x === 0 && y === 1) put(state, x, y, "A", 2);
+          else put(state, x, y, "B", 0);
+        }
+      }
+      state.phase = "place";
+      state.currentTile = { uid: "monastery", typeId: typeId, rot: 0 };
+      assertEqual(selectPending(state, 0, 0), true, "place monastery in surrounded hole");
+      assertEqual(selectPendingMeeple(state, "monastery", 0), true, "select meeple on new monastery");
+      assertEqual(confirmPending(state), true, "confirm monastery placement");
+      return state;
+    }
+
+    ["A", "B"].forEach(function (typeId) {
+      test("monastery " + typeId + " tile has its monastery feature", function () {
+        assertEqual(TILE_TYPES[typeId].monastery, true, "monastery feature flag");
+      });
+
+      test("monastery " + typeId + " completes with the last tile directly beside it", function () {
+        assertMonasteryScored(finishByPlacingAdjacentTile(typeId, 0, -1));
+      });
+
+      test("monastery " + typeId + " completes with the last tile diagonally beside it", function () {
+        assertMonasteryScored(finishByPlacingAdjacentTile(typeId, 1, -1));
+      });
+
+      test("monastery " + typeId + " scores when placed into a hole with eight neighbours", function () {
+        assertMonasteryScored(finishByPlacingMonastery(typeId));
+      });
+    });
+
+    test("rejects city-field contact until the placed tile rotates to match", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+
+      assertEqual(legalCells(state, "F", 1).some(function (cell) {
+        return cell.x === 1 && cell.y === 0;
+      }), false, "invalid spot is not highlighted");
+      assertEqual(canPlaceAt(state, "F", 1, 1, 0), false, "city must not meet field");
+      assertEqual(placeCurrent(state, 1, 0), false, "invalid rotation placement");
+      rotateCurrent(state, -1);
+      assertEqual(state.currentTile.rot, 0, "rotated tile orientation");
+      assertEqual(legalCells(state, "F", 0).some(function (cell) {
+        return cell.x === 1 && cell.y === 0;
+      }), true, "matching spot is highlighted after rotation");
+      assertEqual(canPlaceAt(state, "F", 0, 1, 0), true, "matching city edges");
+      assertEqual(placeCurrent(state, 1, 0), true, "matching rotation placement");
+    });
+
+    test("highlight positions include every square with any legal rotation", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+      const expected = neighborKeys(state).filter(function (cell) {
+        return legalRotationsAt(state, "F", cell.x, cell.y).length > 0;
+      }).map(function (cell) { return keyXY(cell.x, cell.y); }).sort();
+      const highlighted = legalCells(state, "F").map(function (cell) {
+        return keyXY(cell.x, cell.y);
+      }).sort();
+      assertEqual(JSON.stringify(highlighted), JSON.stringify(expected), "all legal squares are highlighted");
+      assertEqual(legalRotationsAt(state, "F", 1, 0).indexOf(1), -1, "the hand rotation is illegal here");
+      assertEqual(highlighted.indexOf("1,0") >= 0, true, "square fitting another rotation is highlighted");
+      assertEqual(selectPending(state, 1, 0), true, "select highlighted square");
+      assertEqual(state.currentTile.rot, 2, "selection chooses the next legal clockwise rotation");
+    });
+
+    test("pending tile cycles clockwise through legal rotations and wraps", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+      assertEqual(selectPending(state, 1, 0), true, "select the pending square");
+      assertEqual(state.currentTile.rot, 2, "selection starts at the next legal clockwise rotation");
+      assertEqual(rotatePending(state), true, "rotate to the next legal orientation");
+      assertEqual(state.currentTile.rot, 0, "illegal orientation is skipped");
+      assertEqual(rotatePending(state), true, "wrap to the next legal orientation");
+      assertEqual(state.currentTile.rot, 2, "rotation wraps clockwise");
+    });
+
+    test("pending tile does not rotate when exactly one rotation is legal", function () {
+      const state = riverGame(["river-lake"], []);
+      beginTurn(state);
+      const rotations = legalRotationsAt(state, state.currentTile.typeId, 0, 1);
+      assertEqual(rotations.length, 1, "lake has one legal orientation at the open end");
+      assertEqual(selectPending(state, 0, 1), true, "select the lake");
+      const option = pendingMeepleOptions(state)[0];
+      assertEqual(!!option, true, "lake exposes an available meeple spot");
+      assertEqual(selectPendingMeeple(state, option.kind, option.index), true, "select a meeple");
+      const before = state.currentTile.rot;
+      assertEqual(rotatePending(state), false, "single legal orientation cannot rotate");
+      assertEqual(state.currentTile.rot, before, "orientation remains unchanged");
+      assertEqual(state.selectedMeeple.kind, option.kind, "selection remains when rotation is unavailable");
+    });
+
+    test("moving a pending tile keeps a legal rotation at its new square", function () {
+      const state = testState();
+      put(state, 0, 0, "B", 0);
+      state.phase = "place";
+      state.currentTile = { uid: "B-test", typeId: "B", rot: 0 };
+      const cells = legalCells(state, "B");
+      assertEqual(cells.length > 1, true, "fixture has multiple legal squares");
+      assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "select initial square");
+      const target = cells.filter(function (cell) {
+        return cell.x !== state.pending.x || cell.y !== state.pending.y;
+      })[0];
+      assertEqual(movePending(state, target.x, target.y), true, "move pending tile");
+      assertEqual(keyXY(state.pending.x, state.pending.y), keyXY(target.x, target.y), "pending square changes");
+      assertEqual(
+        legalRotationsAt(state, state.currentTile.typeId, target.x, target.y)
+          .indexOf(state.currentTile.rot) >= 0,
+        true,
+        "moved orientation remains legal"
+      );
+    });
+
+    test("selecting a meeple spot leaves the turn unscored and undo restores the confirmed turn", function () {
+      const state = testState();
+      state.deck = [{ uid: "next", typeId: "B" }];
+      put(state, 0, 0, "E", 1);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+      assertEqual(selectPending(state, 1, 0), true, "select pending tile");
+      const option = pendingMeepleOptions(state)[0];
+      assertEqual(!!option, true, "legal meeple spots appear on the pending tile");
+      const rotation = state.currentTile.rot;
+      const scoreBefore = state.players[0].score;
+      const supplyBefore = state.players[0].meeples;
+      assertEqual(selectPendingMeeple(state, option.kind, option.index), true, "select a meeple");
+      assertEqual(state.phase, "place", "selection does not end the turn");
+      assertEqual(state.players[0].score, scoreBefore, "selection does not score");
+      assertEqual(state.players[0].meeples, supplyBefore, "selection does not change supply");
+      assertEqual(state.selectedMeeple.kind, option.kind, "selection is stored");
+      assertEqual(confirmPending(state), true, "Confirm ends the turn");
+      assertEqual(state.phase, "handoff", "Confirm advances to the next player");
+      assertEqual(state.currentTile, null, "tile is committed");
+      assertEqual(state.board["1,0"].meeple.kind, option.kind, "meeple is on the tile");
+      assertEqual(undoLast(state), true, "undo the completed turn");
+      assertEqual(state.phase, "place", "return to placement phase");
+      assertEqual(keyXY(state.pending.x, state.pending.y), "1,0", "tile remains pending on its square");
+      assertEqual(boardTile(state, 1, 0), null, "pending tile is not committed to the board");
+      assertEqual(state.players[0].meeples, 7, "undo returns the meeple");
+      assertEqual(state.currentTile.rot, rotation, "undo restores the same rotation");
+      assertEqual(state.selectedMeeple.kind, option.kind, "undo restores the same selection");
+      assertEqual(state.currentTile.meeple, undefined, "selected meeple is not attached before reconfirming");
+      assertEqual(pendingMeepleOptions(state).length > 0, true, "spots return without a placed meeple");
+      assertEqual(rotatePending(state), true, "restored tile is rotatable");
+    });
+
+    test("undo restores scores and selection after a confirmed scoring turn", function () {
+      const state = monasteryCompletionState("B", 0, -1);
+      const supplyBefore = state.players[1].meeples;
+      assertEqual(selectPending(state, 0, -1), true, "select final monastery neighbour");
+      const option = pendingMeepleOptions(state).find(function (spot) {
+        return spot.kind === "field";
+      });
+      assertEqual(!!option, true, "new tile has an available field spot");
+      assertEqual(selectPendingMeeple(state, option.kind, option.index), true, "select meeple without spending it");
+      assertEqual(confirmPending(state), true, "confirm scoring turn");
+      assertEqual(state.players[1].score, 9, "completed monastery scores");
+      assertEqual(undoLast(state), true, "undo completed scoring turn");
+      assertEqual(state.players[1].score, 0, "undo restores score");
+      assertEqual(state.players[1].meeples, supplyBefore, "undo restores meeple supply");
+      assertEqual(keyXY(state.pending.x, state.pending.y), "0,-1", "undo restores tile square");
+      assertEqual(state.selectedMeeple.kind, option.kind, "undo restores the selected meeple");
+      assertEqual(state.board["0,0"].meeple.kind, "monastery", "undo restores the completed feature's meeple");
+      assertEqual(validateBoard(state).length, 0, "undo restores a valid board");
+    });
+
+    function fourSpotPendingFixture() {
+      const state = testState();
+      state.deck = [{ uid: "next", typeId: "B" }];
+      put(state, 0, 0, "A", 0);
+      state.board["0,0"].start = true;
+      state.phase = "place";
+      state.currentTile = { uid: "D-test", typeId: "D", rot: 0 };
+      assertEqual(selectPending(state, 0, -1), true, "select four-spot tile");
+      return state;
+    }
+
+    test("each pending meeple spot selects its meeple without ending or scoring", function () {
+      const fixture = fourSpotPendingFixture();
+      const options = pendingMeepleOptions(fixture);
+      assertEqual(options.length, 4, "fixture has four legal spots");
+      options.forEach(function (option) {
+        const state = fourSpotPendingFixture();
+        const tile = state.currentTile;
+        const rotation = tile.rot;
+        const spec = rotatedType(tile.typeId, tile.rot);
+        const feature = option.kind === "city" ? spec.cities[option.index]
+          : option.kind === "road" ? spec.roads[option.index]
+          : spec.fields[option.index];
+        const anchor = featureAnchor(option.kind, feature);
+        const hit = meepleSpotAt(
+          pendingMeepleOptions(state),
+          spec,
+          anchor.x,
+          anchor.y,
+          1
+        );
+        assertEqual(hit && hit.kind, option.kind, "tap resolves to " + option.kind);
+        assertEqual(hit && hit.index, option.index, "tap resolves to the correct feature");
+        const scoreBefore = state.players[0].score;
+        const supplyBefore = state.players[0].meeples;
+        assertEqual(selectPendingMeeple(state, hit.kind, hit.index), true, "tap selects meeple");
+        assertEqual(state.phase, "place", "spot tap does not end the turn");
+        assertEqual(state.currentTile.rot, rotation, "meeple tap does not rotate");
+        assertEqual(state.selectedMeeple.kind, option.kind, "selected feature kind");
+        assertEqual(state.selectedMeeple.index, option.index, "selected feature index");
+        assertEqual(state.players[0].score, scoreBefore, "selection does not score");
+        assertEqual(state.players[0].meeples, supplyBefore, "selection does not change supply");
+        assertEqual(boardTile(state, 0, -1), null, "tile is not committed before Confirm");
+      });
+
+      const state = manySpotPendingFixture();
+      const spec = rotatedType(state.currentTile.typeId, state.currentTile.rot);
+      let away = null;
+      for (let y = 0.05; y < 1 && !away; y += 0.025) {
+        for (let x = 0.05; x < 1; x += 0.025) {
+          if (!meepleSpotAt(pendingMeepleOptions(state), spec, x, y, 1)) {
+            away = { x: x, y: y };
+            break;
+          }
+        }
+      }
+      assertEqual(!!away, true, "fixture has an area outside meeple hit targets");
+      assertEqual(
+        meepleSpotAt(pendingMeepleOptions(state), spec, away.x, away.y, 1),
+        null,
+        "tap away from a spot does not select a meeple"
+      );
+      const legalRotations = legalRotationsAt(state, state.currentTile.typeId, 0, 1);
+      assertEqual(selectPendingMeeple(state, "road", 0), true, "select meeple before rotating");
+      const before = state.currentTile.rot;
+      assertEqual(rotatePending(state), legalRotations.length > 1, "tap away rotates when another legal way exists");
+      assertEqual(state.currentTile.rot === before, legalRotations.length <= 1, "tap away does not place a meeple");
+      assertEqual(state.selectedMeeple, null, "successful rotation clears the selection");
+      assertEqual(state.phase, "place", "tap away leaves tile pending");
+      assertEqual(boardTile(state, 0, 1), null, "tap away does not commit the tile");
+    });
+
+    test("tapping the selected spot clears it and tapping another spot moves it", function () {
+      const state = manySpotPendingFixture();
+      assertEqual(selectPendingMeeple(state, "road", 0), true, "select first road spot");
+      assertEqual(state.selectedMeeple.index, 0, "first spot selected");
+      assertEqual(selectPendingMeeple(state, "road", 0), true, "tap selected spot again");
+      assertEqual(state.selectedMeeple, null, "selection is cleared");
+      assertEqual(selectPendingMeeple(state, "road", 1), true, "select another road spot");
+      assertEqual(state.selectedMeeple.kind, "road", "new selection kind");
+      assertEqual(state.selectedMeeple.index, 1, "new selection replaces the old one");
+      assertEqual(state.phase, "place", "spot choices keep the turn pending");
+    });
+
+    function manySpotPendingFixture() {
+      const state = testState();
+      put(state, 0, 0, "A", 0);
+      state.board["0,0"].start = true;
+      state.phase = "place";
+      state.currentTile = { uid: "X-test", typeId: "X", rot: 0 };
+      assertEqual(selectPending(state, 0, 1), true, "select multi-spot tile");
+      return state;
+    }
+
+    test("pending spots match the available features after every legal rotation", function () {
+      const state = manySpotPendingFixture();
+      const rotations = legalRotationsAt(state, state.currentTile.typeId, 0, 1);
+      assertEqual(rotations.length > 1, true, "fixture has multiple legal rotations");
+      const expectedFor = function (rotation) {
+        const tile = {
+          uid: state.currentTile.uid,
+          typeId: state.currentTile.typeId,
+          rot: rotation,
+          meeple: null,
+          start: false
+        };
+        return meepleOptionsAt(state, 0, 1, tile).filter(function (option) {
+          return !option.blocked;
+        }).map(function (option) {
+          return option.kind + ":" + option.index;
+        }).sort();
+      };
+      rotations.forEach(function (rotation, index) {
+        assertEqual(state.currentTile.rot, rotation, "rotation advances clockwise");
+        assertEqual(
+          JSON.stringify(pendingMeepleOptions(state).map(function (option) {
+            return option.kind + ":" + option.index;
+          }).sort()),
+          JSON.stringify(expectedFor(rotation)),
+          "spots match legal features at rotation " + rotation
+        );
+        if (index + 1 < rotations.length) {
+          assertEqual(rotatePending(state), true, "rotate to next legal orientation");
+        }
+      });
+    });
+
+    test("a field with an existing farmer has no pending meeple spot", function () {
+      const state = testState();
+      put(state, 0, 0, "B", 0, meeple(1, "field", 0));
+      state.board["0,0"].start = true;
+      state.phase = "place";
+      state.currentTile = { uid: "B-test", typeId: "B", rot: 0 };
+      assertEqual(selectPending(state, 1, 0), true, "select adjacent field tile");
+      assertEqual(
+        pendingMeepleOptions(state).some(function (option) { return option.kind === "field"; }),
+        false,
+        "occupied field is hidden"
+      );
+    });
+
+    test("Confirm with no selected meeple ends the turn without placing one", function () {
+      const state = fourSpotPendingFixture();
+      assertEqual(confirmPending(state), true, "Confirm without a meeple");
+      assertEqual(state.phase, "handoff", "Confirm ends the turn");
+      assertEqual(state.board["0,-1"].meeple, null, "tile has no meeple");
+      assertEqual(state.players[0].meeples, 7, "meeple supply is unchanged");
+    });
+
+    test("players without meeples see no pending spots and can skip", function () {
+      const state = fourSpotPendingFixture();
+      state.players[0].meeples = 0;
+      assertEqual(pendingMeepleOptions(state).length, 0, "no spots are available");
+      assertEqual(confirmPending(state), true, "Confirm ends the turn");
+      assertEqual(state.board["0,-1"].meeple, null, "skip does not place a meeple");
+    });
+
+    test("only legal rotation leaves the selected meeple in place", function () {
+      const state = riverGame(["river-lake"], []);
+      beginTurn(state);
+      assertEqual(selectPending(state, 0, 1), true, "select lake tile");
+      const spot = pendingMeepleOptions(state)[0];
+      assertEqual(!!spot, true, "lake has an available field spot");
+      assertEqual(selectPendingMeeple(state, spot.kind, spot.index), true, "select lake field");
+      const selected = state.selectedMeeple;
+      assertEqual(rotatePending(state), false, "only legal orientation cannot rotate");
+      assertEqual(state.selectedMeeple.kind, selected.kind, "selection remains");
+      assertEqual(state.selectedMeeple.index, selected.index, "same spot remains selected");
+    });
+
+    test("ending a turn rechecks legality after a pending placement becomes invalid", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      state.phase = "place";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+      assertEqual(selectPending(state, 1, 0), true, "select legal square");
+      put(state, 0, 0, "D", 0);
+      assertEqual(confirmPending(state), false, "refuse placement after its neighbor changes");
+      assertEqual(boardTile(state, 1, 0), null, "invalid pending tile remains uncommitted");
+    });
+
+    test("Confirm rechecks that a selected meeple is still available", function () {
+      const state = fourSpotPendingFixture();
+      const option = pendingMeepleOptions(state)[0];
+      assertEqual(selectPendingMeeple(state, option.kind, option.index), true, "select an available meeple");
+      state.players[0].meeples = 0;
+      assertEqual(confirmPending(state), false, "refuse an unavailable selected meeple");
+      assertEqual(state.phase, "place", "turn remains pending");
+      assertEqual(boardTile(state, 0, -1), null, "tile is not committed");
+      assertEqual(state.selectedMeeple.kind, option.kind, "selection remains available for correction");
+    });
+
+    test("saving a pending tile resumes it in hand without a placed tile", function () {
+      const previousSave = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = testState();
+        put(state, 0, 0, "E", 1);
+        state.phase = "place";
+        state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+        assertEqual(selectPending(state, 1, 0), true, "select pending tile");
+        const option = pendingMeepleOptions(state)[0];
+        assertEqual(!!option, true, "pending tile has an available meeple spot");
+        assertEqual(selectPendingMeeple(state, option.kind, option.index), true, "select a meeple before saving");
+        const resumed = loadSave();
+        assertEqual(resumed.phase, "place", "resume in placement phase");
+        assertEqual(resumed.pending, null, "pending coordinate is not saved");
+        assertEqual(resumed.selectedMeeple, null, "meeple selection is not saved");
+        assertEqual(resumed.currentTile.uid, "F-test", "tile is back in hand");
+        assertEqual(boardTile(resumed, 1, 0), null, "no half-placed tile is saved");
+      } finally {
+        if (previousSave === null) localStorage.removeItem(SAVE_KEY);
+        else localStorage.setItem(SAVE_KEY, previousSave);
+      }
+    });
+
+    test("River pending rotation never offers a rotation that breaks a River rule", function () {
+      const state = riverGame(["river-curve", "river-curve", "river-lake"], ["B"]);
+      playRiverRotation(state, "river-curve", 1, null, 0);
+      beginTurn(state);
+      const open = state.riverOpenEnd;
+      const rotations = legalRotationsAt(state, state.currentTile.typeId, open.x, open.y);
+      assertEqual(rotations.indexOf(2), -1, "same-direction River turn is illegal");
+      assertEqual(selectPending(state, open.x, open.y), true, "select next River tile");
+      for (let i = 0; i < 4; i++) {
+        assertEqual(
+          rotations.indexOf(state.currentTile.rot) >= 0,
+          true,
+          "pending rotation obeys the complete River legality check"
+        );
+        if (!rotatePending(state)) break;
+      }
+
+      const blocked = riverGame(["river-curve"], []);
+      beginTurn(blocked);
+      const openEnd = blocked.riverOpenEnd;
+      const candidateRotations = legalRotationsAt(
+        blocked,
+        blocked.currentTile.typeId,
+        openEnd.x,
+        openEnd.y
+      );
+      const outgoing = rotatedType(blocked.currentTile.typeId, candidateRotations[0]).edges
+        .map(function (edge, index) {
+          return edge === RIVER && index !== openEnd.incomingEdge ? index : -1;
+        }).filter(function (edge) { return edge >= 0; })[0];
+      let lakeRotation = 0;
+      while (rotatedType(RIVER_LAKE_ID, lakeRotation).edges[OPPOSITE[outgoing]] !== RIVER) {
+        lakeRotation++;
+      }
+      put(
+        blocked,
+        openEnd.x + DIR_DELTA[outgoing].x,
+        openEnd.y + DIR_DELTA[outgoing].y,
+        RIVER_LAKE_ID,
+        lakeRotation
+      );
+      assertEqual(
+        legalRotationsAt(blocked, blocked.currentTile.typeId, openEnd.x, openEnd.y)
+          .indexOf(candidateRotations[0]),
+        -1,
+        "rotation pointing into an occupied square is illegal"
+      );
+    });
+
+    test("validateBoard accepts a legal River path after the lake", function () {
+      const state = riverGame(
+        ["river-straight", "river-straight", "river-lake"],
+        ["B"]
+      );
+      playFirstLegalRiverTurn(state);
+      playFirstLegalRiverTurn(state);
+      playFirstLegalRiverTurn(state);
+      assertEqual(state.riverOpenEnd, null, "lake closes the River");
+      assertEqual(validateBoard(state).length, 0, "River path remains legal");
+    });
+
+    test("rotation is unavailable after a tile has been placed", function () {
+      const state = testState();
+      state.phase = "meeple";
+      state.currentTile = { uid: "F-test", typeId: "F", rot: 1 };
+      state.placed = { x: 1, y: 0 };
+      rotateCurrent(state, 1);
+      assertEqual(state.currentTile.rot, 1, "placed tile rotation stays fixed");
+    });
+
+    test("reported tile edges match their drawn city and field features", function () {
+      const cityOnRight = rotatedType("E", 1);
+      const verticalCity = rotatedType("F", 1);
+      assertEqual(cityOnRight.edges[E], CITY, "existing tile right edge");
+      assertEqual(cityOnRight.edges[N], FIELD, "existing tile other edge");
+      assertEqual(cityOnRight.edges[S], FIELD, "existing tile other edge");
+      assertEqual(cityOnRight.edges[W], FIELD, "existing tile other edge");
+      assertEqual(verticalCity.edges[N], CITY, "new tile top edge");
+      assertEqual(verticalCity.edges[S], CITY, "new tile bottom edge");
+      assertEqual(verticalCity.edges[E], FIELD, "new tile right edge");
+      assertEqual(verticalCity.edges[W], FIELD, "new tile shared edge");
+      assertEqual(cityOnRight.cities[0].edges.indexOf(E) >= 0, true, "drawn city reaches right edge");
+      assertEqual(verticalCity.cities[0].edges.indexOf(N) >= 0, true, "drawn city reaches top edge");
+      assertEqual(verticalCity.cities[0].edges.indexOf(S) >= 0, true, "drawn city reaches bottom edge");
+      assertEqual(typeof paintTile, "function", "renderer is available to use rotated tile data");
+    });
+
+    test("drawing and legality share the rotated edge orientation for every tile", function () {
+      Object.keys(TILE_TYPES).forEach(function (id) {
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(id, rot);
+          const state = testState();
+          put(state, 0, 0, "D", 0);
+          const expected = spec.edges[W] === rotatedType("D", 0).edges[E];
+          assertEqual(canPlaceAt(state, id, rot, 1, 0), expected, id + " legal edge at rotation " + rot);
+
+          spec.cities.forEach(function (city) {
+            city.edges.forEach(function (edge) {
+              assertEqual(spec.edges[edge], CITY, id + " rendered city edge " + edge + " at rotation " + rot);
+            });
+          });
+          spec.roads.forEach(function (road) {
+            road.edges.forEach(function (edge) {
+              assertEqual(spec.edges[edge], ROAD, id + " rendered road edge " + edge + " at rotation " + rot);
+            });
+          });
+        }
+      });
+    });
+
+    test("validateBoard reports every neighbouring edge mismatch once", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      put(state, 1, 0, "F", 1);
+      const mismatches = validateBoard(state);
+      assertEqual(mismatches.length, 1, "mismatch count");
+      assertEqual(mismatches[0].x, 0, "first tile x");
+      assertEqual(mismatches[0].y, 0, "first tile y");
+      assertEqual(mismatches[0].neighborX, 1, "second tile x");
+      assertEqual(mismatches[0].neighborY, 0, "second tile y");
+      assertEqual(mismatches[0].edgeType, CITY, "first edge type");
+      assertEqual(mismatches[0].neighborEdgeType, FIELD, "second edge type");
+
+      state.board["1,0"].rot = 0;
+      assertEqual(validateBoard(state).length, 0, "matching edges are valid");
+    });
+
+    test("confirmed turn warns when the board contains mismatched edges", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 1);
+      put(state, 1, 0, "F", 1);
+      state.phase = "meeple";
+      state.placed = { x: 1, y: 0 };
+      state.meeplePicked = true;
+      state.deck = [{ uid: "next", typeId: "B" }];
+      const originalWarn = console.warn;
+      let warned = false;
+      console.warn = function (message, mismatches) {
+        warned = message.indexOf("mismatched") !== -1 && mismatches.length === 1;
+      };
+      try {
+        assertEqual(confirmTurn(state), true, "turn confirmation");
+      } finally {
+        console.warn = originalWarn;
+      }
+      assertEqual(warned, true, "console warning");
+    });
+
+    test("completed three-tile road scores one per tile and returns its meeple", function () {
+      const state = testState();
+      put(state, 0, 0, "U", 0, meeple(0, "road", 0));
+      put(state, 0, -1, "A", 0);
+      put(state, 0, 1, "A", 2);
+      state.players[0].meeples = 6;
+      const logs = scoreCompletedFeatures(state);
+      assertEqual(state.players[0].score, 3, "road score");
+      assertEqual(state.players[0].meeples, 7, "returned meeple count");
+      assertEqual(logs.length, 1, "scored feature count");
+    });
+
+    test("completed five-tile city scores two per tile and two per pennant", function () {
+      const state = testState();
+      put(state, 0, 0, "C", 0, meeple(0, "city", 0));
+      put(state, 0, -1, "E", 2);
+      put(state, 1, 0, "E", 3);
+      put(state, 0, 1, "E", 0);
+      put(state, -1, 0, "E", 1);
+      state.players[0].meeples = 6;
+      scoreCompletedFeatures(state);
+      assertEqual(state.players[0].score, 12, "completed city score");
+      assertEqual(state.players[0].meeples, 7, "returned meeple count");
+    });
+
+    test("closed city beside curved road scores four and returns Blue's meeple", function () {
+      const state = testState();
+      state.current = 1;
+      put(state, 0, -1, "J", 2);
+      put(state, 0, 0, "H", 0);
+      put(state, 0, 1, "D", 0, meeple(0, "city", 0));
+      state.board["0,1"].start = true;
+      state.players[0].meeples = 6;
+      state.phase = "meeple";
+      state.placed = { x: 0, y: -1 };
+
+      assertEqual(placeMeeple(state, "city", 0), true, "place meeple on city");
+      assertEqual(state.board["0,-1"].meeple.kind, "city", "meeple feature kind");
+      assertEqual(state.board["0,-1"].meeple.index, 0, "meeple feature index");
+      const logs = scoreCompletedFeatures(state);
+      assertEqual(state.players[1].score, 2, "Blue city score");
+      assertEqual(state.players[1].meeples, 7, "Blue returned meeple count");
+      assertEqual(state.players[0].score, 2, "Red adjacent city score");
+      assertEqual(state.players[0].meeples, 7, "Red returned meeple count");
+      assertEqual(logs.length, 2, "both closed cities score");
+    });
+
+    test("city and road edges stay separate on every mixed-feature tile", function () {
+      Object.keys(TILE_TYPES).forEach(function (id) {
+        const tile = TILE_TYPES[id];
+        if (!tile.cities.length || !tile.roads.length) return;
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(id, rot);
+          const cityEdges = spec.cities.reduce(function (edges, city) {
+            return edges.concat(city.edges);
+          }, []);
+          const roadEdges = spec.roads.reduce(function (edges, road) {
+            return edges.concat(road.edges);
+          }, []);
+          cityEdges.forEach(function (edge) {
+            assertEqual(spec.edges[edge], CITY, id + " city edge " + edge + " at rotation " + rot);
+          });
+          roadEdges.forEach(function (edge) {
+            assertEqual(spec.edges[edge], ROAD, id + " road edge " + edge + " at rotation " + rot);
+          });
+          cityEdges.forEach(function (edge) {
+            assertEqual(roadEdges.indexOf(edge), -1, id + " city-road overlap at rotation " + rot);
+          });
+        }
+      });
+    });
+
+    test("both curved-road city tiles keep the city cap separate", function () {
+      const leftTurn = rotatedType("J", 2);
+      const rightTurn = rotatedType("K", 2);
+      assertEqual(JSON.stringify(leftTurn.cities[0].edges), JSON.stringify([S]), "left-turn city edge");
+      assertEqual(JSON.stringify(leftTurn.roads[0].edges.slice().sort()), JSON.stringify([N, W]), "left-turn road edges");
+      assertEqual(JSON.stringify(rightTurn.cities[0].edges), JSON.stringify([S]), "right-turn city edge");
+      assertEqual(JSON.stringify(rightTurn.roads[0].edges), JSON.stringify([N, E]), "right-turn road edges");
+    });
+
+    test("tied road majority awards full points to both players", function () {
+      const state = testState();
+      put(state, 0, 0, "U", 0, meeple(0, "road", 0));
+      put(state, 0, -1, "A", 0, meeple(1, "road", 0));
+      put(state, 0, 1, "A", 2);
+      state.players[0].meeples = 6;
+      state.players[1].meeples = 6;
+      scoreCompletedFeatures(state);
+      assertEqual(state.players[0].score, 3, "red tied score");
+      assertEqual(state.players[1].score, 3, "blue tied score");
+      assertEqual(state.players[1].meeples, 7, "blue returned meeple count");
+    });
+
+    test("monastery with all eight neighbours scores nine", function () {
+      const state = testState();
+      put(state, 0, 0, "B", 0, meeple(0, "monastery", 0));
+      for (let y = -1; y <= 1; y++) {
+        for (let x = -1; x <= 1; x++) {
+          if (x || y) put(state, x, y, "E", 0);
+        }
+      }
+      state.players[0].meeples = 6;
+      scoreCompletedFeatures(state);
+      assertEqual(state.players[0].score, 9, "completed monastery score");
+      assertEqual(state.players[0].meeples, 7, "returned meeple count");
+    });
+
+    test("unfinished city scores one per tile and one per pennant", function () {
+      const state = testState();
+      put(state, 0, 0, "C", 0, meeple(0, "city", 0));
+      put(state, 1, 0, "E", 3);
+      state.players[0].meeples = 6;
+      const logs = scoreUnfinishedFeatures(state);
+      assertEqual(state.players[0].score, 3, "unfinished city score");
+      assertEqual(logs.length, 1, "scored feature count");
+    });
+
+    test("meeple on one village road does not score its separate roads", function () {
+      const state = testState();
+      put(state, 0, 0, "L", 0, meeple(0, "road", 0));
+      state.players[0].meeples = 6;
+      const logs = scoreUnfinishedFeatures(state);
+      assertEqual(state.players[0].score, 1, "single road score");
+      assertEqual(logs.length, 1, "scored road count");
+      assertEqual(state.players[0].meeples, 7, "returned meeple count");
+    });
+
+    test("unfinished monastery scores one plus its three neighbours", function () {
+      const state = testState();
+      put(state, 0, 0, "B", 0, meeple(0, "monastery", 0));
+      put(state, -1, -1, "E", 0);
+      put(state, 0, -1, "E", 0);
+      put(state, 1, 0, "E", 0);
+      state.players[0].meeples = 6;
+      const logs = scoreUnfinishedFeatures(state);
+      assertEqual(state.players[0].score, 4, "unfinished monastery score");
+      assertEqual(logs.length, 1, "scored feature count");
+    });
+
+    test("finishing the game settles scores only once", function () {
+      const state = testState();
+      put(state, 0, 0, "C", 0, meeple(0, "city", 0));
+      put(state, 1, 0, "E", 3);
+      state.players[0].meeples = 6;
+      finishGame(state);
+      finishGame(state);
+      assertEqual(state.players[0].score, 3, "final unfinished city score");
+      assertEqual(state.phase, "end", "final phase");
+      assertEqual(state.finalScored, true, "final scoring flag");
+    });
+
+    test("short deck draws ten random tiles after the fixed start tile", function () {
+      const standard = makeDeck();
+      const short = makeDeck(10);
+      assertEqual(standard.deck.length, 71, "standard deck size is unchanged");
+      assertEqual(short.deck.length, 10, "short deck size");
+      assertEqual(short.start.typeId, "D", "fixed start tile");
+      assertEqual(short.deck.some(function (tile) { return tile.uid === short.start.uid; }), false, "start is not redrawn");
+      assertEqual(new Set(short.deck.map(function (tile) { return tile.uid; })).size, 10, "short deck tiles are unique");
+      assertEqual(short.deck.every(function (tile) { return !!TILE_TYPES[tile.typeId]; }), true, "tiles come from normal mix");
+    });
+
+    function assertEndGamePoints(player, roads, cities, monasteries, farms) {
+      assertEqual(JSON.stringify(player.endGamePoints), JSON.stringify({
+        roads: roads,
+        cities: cities,
+        monasteries: monasteries,
+        farms: farms || 0
+      }), player.name + " end-game category points");
+    }
+
+    function playTurn(state, x, y, rotation, kind, index) {
+      beginTurn(state);
+      assertEqual(state.gameOver, false, "tile is placeable");
+      for (let i = 0; i < rotation; i++) rotateCurrent(state, 1);
+      assertEqual(selectPending(state, x, y), true, "place drawn tile pending");
+      if (kind) assertEqual(selectPendingMeeple(state, kind, index), true, "select meeple");
+      assertEqual(confirmPending(state), true, "confirm turn");
+    }
+
+    function riverGame(riverTypes, normalTypes) {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], undefined, true);
+      if (riverTypes) {
+        state.riverDeck = riverTypes.map(function (typeId, index) {
+          return { uid: "river-test-" + index, typeId: typeId };
+        });
+      }
+      if (normalTypes) {
+        state.deck = normalTypes.map(function (typeId, index) {
+          return { uid: "normal-test-" + index, typeId: typeId };
+        });
+      }
+      return state;
+    }
+
+    function playRiverRotation(state, typeId, rotation, kind, index) {
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, typeId, "draw expected river tile");
+      for (let i = 0; i < rotation; i++) rotateCurrent(state, 1);
+      const cells = legalCells(state, typeId, rotation);
+      assertEqual(cells.length > 0, true, "river tile has a legal continuation");
+      assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "place river tile pending");
+      if (kind) assertEqual(selectPendingMeeple(state, kind, index), true, "select meeple");
+      assertEqual(confirmPending(state), true, "confirm river turn");
+    }
+
+    function playRiverAt(state, typeId, x, y, rotation, kind, index) {
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, typeId, "draw expected river tile");
+      for (let i = 0; i < rotation; i++) rotateCurrent(state, 1);
+      assertEqual(selectPending(state, x, y), true, "place river tile pending");
+      if (kind) assertEqual(selectPendingMeeple(state, kind, index), true, "select river-tile meeple");
+      assertEqual(confirmPending(state), true, "confirm river turn");
+    }
+
+    function playFirstLegalRiverTurn(state) {
+      beginTurn(state);
+      assertEqual(!!RIVER_TILE_TYPES[state.currentTile.typeId], true, "draw a river tile");
+      for (let rotation = 0; rotation < 4; rotation++) {
+        const cells = legalCells(state, state.currentTile.typeId, rotation);
+        if (!cells.length) continue;
+        for (let i = 0; i < rotation; i++) rotateCurrent(state, 1);
+        assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "place legal river tile pending");
+        assertEqual(confirmPending(state), true, "confirm river turn");
+        return;
+      }
+      throw new Error("no legal river placement");
+    }
+
+    test("full ?tiles=10 game played through pending placements validates cleanly", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], 10);
+      for (let turn = 0; turn < 10; turn++) {
+        beginTurn(state);
+        assertEqual(state.gameOver, false, "draw a placeable tile");
+        const cells = legalCells(state, state.currentTile.typeId);
+        assertEqual(cells.length > 0, true, "tile has at least one legal square");
+        assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "select legal square");
+        assertEqual(confirmPending(state), true, "confirm without a meeple");
+      }
+      assertEqual(state.gameOver, true, "short game completes");
+      assertEqual(validateBoard(state).length, 0, "completed board has no legality errors");
+    });
+
+    test("full ?tiles=10 River game through pending placements validates cleanly", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], 10, true);
+      while (!state.gameOver) {
+        beginTurn(state);
+        if (state.gameOver) break;
+        const cells = legalCells(state, state.currentTile.typeId);
+        assertEqual(cells.length > 0, true, "drawn tile has a legal square");
+        assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "select legal square");
+        assertEqual(confirmPending(state), true, "confirm without a meeple");
+      }
+      assertEqual(validateBoard(state).length, 0, "completed River board has no legality errors");
+    });
+
+    function fieldGame(turns) {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], turns.length);
+      state.deck = turns.map(function (turn, index) {
+        return { uid: "field-" + index, typeId: turn.typeId };
+      });
+      return state;
+    }
+
+    function cityTurnGame(types) {
+      const state = testState();
+      put(state, 0, 0, "D", 0);
+      state.board["0,0"].start = true;
+      state.phase = "handoff";
+      state.deck = types.map(function (typeId, index) {
+        return { uid: "city-turn-" + index, typeId: typeId };
+      });
+      return state;
+    }
+
+    function assertFarmPoints(state, player, points) {
+      assertEqual(state.players[player].endGamePoints.farms, points, "farm category points");
+    }
+
+    test("a city counts farmers across its separate fields for the majority", function () {
+      const state = fieldGame([
+        { typeId: "F" },
+        { typeId: "F" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 0, -1, 1, "field", 0);
+      playTurn(state, 0, -2, 1, "field", 0);
+      playTurn(state, 0, -3, 2, "field", 0);
+      assertFarmPoints(state, 0, 4);
+      assertFarmPoints(state, 1, 0);
+      assertEqual(state.players[0].score, 4, "Red wins with two farmers across separate fields");
+      assertEqual(state.players[1].score, 0, "Blue does not win with one farmer");
+      assertEqual(featureKey(collectFeature(state, 0, -1, "field", 0)) ===
+        featureKey(collectFeature(state, 0, -3, "field", 0)), false,
+      "Red's farmers occupy different fields");
+      assertEqual(state.board["0,-1"].meeple.kind, "field", "farmer remains on board");
+      assertEqual(state.players[0].meeples, 5, "farmers are not returned at game end");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("City (4 tiles): Red 2, Blue 1, Red +4") !== -1;
+      }), true, "city-level farmer counts and award appear in the final log");
+    });
+
+    test("one farmer each in separate fields tied for a city score four each", function () {
+      const state = fieldGame([
+        { typeId: "F" },
+        { typeId: "F" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 0, -1, 1, "field", 0);
+      playTurn(state, 0, -2, 1, "field", 0);
+      playTurn(state, 0, -3, 2, null, 0);
+      assertFarmPoints(state, 0, 4);
+      assertFarmPoints(state, 1, 4);
+      assertEqual(featureKey(collectFeature(state, 0, -1, "field", 0)) ===
+        featureKey(collectFeature(state, 0, -2, "field", 0)), false,
+      "tied farmers occupy different fields");
+    });
+
+    test("unfinished city gives a farmer no points", function () {
+      const state = fieldGame([{ typeId: "D" }]);
+      playTurn(state, 1, 0, 0, "field", 0);
+      assertFarmPoints(state, 0, 0);
+      assertEqual(state.players[0].score, 0, "unfinished city is not counted");
+    });
+
+    test("farmer on the other side of the road scores no city", function () {
+      const state = fieldGame([
+        { typeId: "D" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 1, 0, 0, "field", 1);
+      playTurn(state, 1, -1, 2, null, 0);
+      assertFarmPoints(state, 0, 0);
+      assertEqual(state.players[0].score, 0, "road keeps this field from the city");
+    });
+
+    test("one field touching the same completed city on two tiles scores four once", function () {
+      const state = fieldGame([
+        { typeId: "E" },
+        { typeId: "A" },
+        { typeId: "B" }
+      ]);
+      playTurn(state, 0, -1, 2, null, 0);
+      playTurn(state, 1, 0, 1, null, 0);
+      playTurn(state, 1, -1, 0, "field", 0);
+      const completedCities = allFeatures(state).filter(function (feature) {
+        return feature.kind === "city" && featureComplete(state, feature);
+      });
+      assertEqual(completedCities.length, 1, "there is one completed city");
+      const touchingFields = completedCities[0].nodes.flatMap(function (node) {
+        const spec = rotatedType(node.tile.typeId, node.tile.rot);
+        return spec.fields.map(function (field, index) {
+          return field.cityAreas.indexOf(node.index) !== -1
+            ? featureKey(collectFeature(state, node.x, node.y, "field", index))
+            : null;
+        }).filter(Boolean);
+      });
+      assertEqual(touchingFields.length, 2, "the same field touches the city on two city tiles");
+      assertEqual(touchingFields[0], touchingFields[1], "the two contacts are one connected field");
+      assertFarmPoints(state, 0, 4);
+      assertEqual(state.players[0].score, 4, "one completed city is counted once");
+    });
+
+    test("one field touching two completed cities scores eight", function () {
+      const state = fieldGame([
+        { typeId: "D" },
+        { typeId: "D" },
+        { typeId: "E" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 1, 0, 0, "field", 0);
+      playTurn(state, 2, 0, 0, null, 0);
+      playTurn(state, 1, -1, 2, null, 0);
+      playTurn(state, 2, -1, 2, null, 0);
+      assertFarmPoints(state, 0, 8);
+      assertEqual(state.players[0].score, 8, "two completed cities are counted");
+    });
+
+    test("a farmer touching two cities scores for each city while two farmers win only the other", function () {
+      const state = fieldGame([
+        { typeId: "H" },
+        { typeId: "F" },
+        { typeId: "F" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 0, -1, 0, "field", 0);
+      playTurn(state, 0, -2, 1, "field", 0);
+      playTurn(state, 0, -3, 1, null, 0);
+      playTurn(state, 0, -4, 2, "field", 0);
+      assertFarmPoints(state, 0, 4);
+      assertFarmPoints(state, 1, 4);
+      assertEqual(state.scoreLog.filter(function (message) {
+        return message.indexOf("City (") === 0;
+      }).length, 2, "one farm log line per completed city");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("City (2 tiles): Red 1, Red +4") !== -1;
+      }), true, "Red wins city X with one farmer");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("City (4 tiles): Red 1, Blue 2, Blue +4") !== -1;
+      }), true, "Blue wins city Y with two farmers");
+    });
+
+    test("placing a farmer in an already farmed connected field is refused", function () {
+      const state = fieldGame([
+        { typeId: "D" },
+        { typeId: "D" }
+      ]);
+      playTurn(state, 1, 0, 0, "field", 0);
+      beginTurn(state);
+      assertEqual(selectPending(state, 2, 0), true, "place second road tile pending");
+      assertEqual(selectPendingMeeple(state, "field", 0), false, "reject second farmer");
+      assertEqual(confirmPending(state), true, "confirm without a second farmer");
+      assertEqual(state.board["2,0"].meeple, null, "second tile remains unclaimed");
+    });
+
+    ["A", "B"].forEach(function (typeId) {
+      test("farmer field spot on monastery tile " + typeId + " scores correctly", function () {
+        const turns = typeId === "A"
+          ? [{ typeId: "D" }, { typeId: "A" }, { typeId: "E" }]
+          : [{ typeId: "D" }, { typeId: "A" }, { typeId: "E" }, { typeId: "B" }];
+        const state = fieldGame(turns);
+        playTurn(state, 1, 0, 0, null, 0);
+        playTurn(state, 2, 0, 1, typeId === "A" ? "field" : null, 0);
+        playTurn(state, 1, -1, 2, null, 0);
+        if (typeId === "B") playTurn(state, 2, -1, 0, "field", 0);
+        const farmerTile = typeId === "A" ? state.board["2,0"] : state.board["2,-1"];
+        assertEqual(farmerTile.meeple.kind, "field", "farmer remains on monastery tile field");
+        assertFarmPoints(state, 1, 4);
+      });
+    });
+
+    test("crossroads farmer belongs to only one of its four fields", function () {
+      const state = fieldGame([
+        { typeId: "X" },
+        { typeId: "E" }
+      ]);
+      playTurn(state, 1, 0, 0, "field", 3);
+      playTurn(state, 0, -1, 2, null, 0);
+      const fieldSizes = [0, 1, 2, 3].map(function (index) {
+        const feature = collectFeature(state, 1, 0, "field", index);
+        const crossroadsNodes = feature.nodes.filter(function (node) {
+          return node.x === 1 && node.y === 0;
+        });
+        assertEqual(crossroadsNodes.length, 1, "each field contains exactly its own crossroads area");
+        return feature.nodes.map(function (node) {
+          return node.x + "," + node.y + ":" + node.index;
+        });
+      });
+      for (let i = 0; i < fieldSizes.length; i++) {
+        for (let j = i + 1; j < fieldSizes.length; j++) {
+          assertEqual(fieldSizes[i].some(function (tile) {
+            return fieldSizes[j].indexOf(tile) !== -1;
+          }), false, "crossroads fields do not merge");
+        }
+      }
+      assertFarmPoints(state, 0, 4);
+    });
+
+    test("every rotated field retains valid local city-area links", function () {
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        for (let rot = 0; rot < 4; rot++) {
+          const spec = rotatedType(typeId, rot);
+          spec.fields.forEach(function (field, index) {
+            assertEqual(Array.isArray(field.cityAreas), true,
+              typeId + " field " + (index + 1) + " has city-area data");
+            field.cityAreas.forEach(function (cityIndex) {
+              assertEqual(cityIndex >= 0 && cityIndex < spec.cities.length, true,
+                typeId + " field " + (index + 1) + " references a city on rotation " + rot);
+            });
+          });
+        }
+      });
+    });
+
+    test("saved game resume retains farmers and their meeple count", function () {
+      const state = fieldGame([{ typeId: "D" }]);
+      playTurn(state, 1, 0, 0, "field", 0);
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        persist(state);
+        const resumed = loadSave();
+        assertEqual(resumed.board["1,0"].meeple.kind, "field", "farmer is restored on the board");
+        assertEqual(resumed.board["1,0"].meeple.player, 0, "farmer owner is restored");
+        assertEqual(resumed.players[0].meeples, 6, "farmer meeple remains unavailable");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("end-game unfinished road of three tiles scores three road points", function () {
+      const state = testState();
+      put(state, 0, 0, "U", 0);
+      put(state, 0, 1, "U", 0);
+      state.phase = "handoff";
+      state.deck = [{ uid: "last-road", typeId: "U" }];
+
+      playTurn(state, 0, -1, 0, "road", 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 3, "three-tile road score");
+      assertEndGamePoints(state.players[0], 3, 0, 0);
+    });
+
+    test("end-game unfinished two-tile city with one pennant scores three city points", function () {
+      const state = testState();
+      put(state, 0, 0, "E", 2);
+      state.phase = "handoff";
+      state.deck = [{ uid: "last-city", typeId: "C" }];
+
+      playTurn(state, 0, 1, 0, "city", 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 3, "two tiles plus one pennant");
+      assertEndGamePoints(state.players[0], 0, 3, 0);
+    });
+
+    test("end-game monastery with four neighbours scores five monastery points", function () {
+      const state = testState();
+      put(state, 0, -1, "B", 0);
+      put(state, 1, 0, "B", 0);
+      put(state, 0, 1, "B", 0);
+      put(state, -1, 0, "B", 0);
+      state.phase = "handoff";
+      state.deck = [{ uid: "last-monastery", typeId: "B" }];
+
+      playTurn(state, 0, 0, 0, "monastery", 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 5, "monastery plus four neighbours");
+      assertEndGamePoints(state.players[0], 0, 0, 5);
+    });
+
+    test("end-game tied majority on one unfinished city scores both players", function () {
+      const state = testState();
+      put(state, 0, -3, "B", 0);
+      put(state, -1, -2, "B", 0);
+      put(state, 0, -2, "B", 0);
+      put(state, 1, -2, "B", 0);
+      put(state, -1, -1, "B", 0);
+      put(state, 1, -1, "B", 0);
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "red-city", typeId: "E" },
+        { uid: "blue-city", typeId: "E" },
+        { uid: "city-joiner", typeId: "C" }
+      ];
+
+      playTurn(state, -1, 0, 1, "city", 0);
+      playTurn(state, 1, 0, 3, "city", 0);
+      playTurn(state, 0, 0, 0, null, 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 4, "Red gets full tied city score");
+      assertEqual(state.players[1].score, 4, "Blue gets full tied city score");
+      assertEndGamePoints(state.players[0], 0, 4, 0);
+      assertEndGamePoints(state.players[1], 0, 4, 0);
+    });
+
+    test("start tile city closed by a cap scores two points and returns its meeple", function () {
+      const state = cityTurnGame(["E", "B"]);
+      playTurn(state, 0, -1, 2, "city", 0);
+
+      assertEqual(state.players[0].score, 2, "completed two-tile city score");
+      assertEqual(state.players[0].meeples, 7, "returned city meeple");
+      assertEqual(state.scoreLog.some(function (message) {
+        return message.indexOf("Small city (2 tiles): Red +2") !== -1;
+      }), true, "small city is identified in the scoring log");
+    });
+
+    test("completed three-tile city without a pennant scores six points", function () {
+      const state = cityTurnGame(["G", "E", "B"]);
+      playTurn(state, 0, -1, 1, "city", 0);
+      playTurn(state, 0, -2, 2, null, 0);
+
+      assertEqual(state.players[0].score, 6, "completed three-tile city score");
+      assertEqual(state.players[0].meeples, 7, "returned city meeple");
+    });
+
+    test("completed small city scores during play and its farmer scores at game end", function () {
+      const state = cityTurnGame(["E", "B"]);
+      playTurn(state, 0, -1, 2, "city", 0);
+
+      assertEqual(state.players[0].score, 2, "small city points during play");
+      playTurn(state, -1, -1, 0, "field", 0);
+
+      assertEqual(state.players[1].score, 4, "farmer points at game end");
+      assertFarmPoints(state, 1, 4);
+      assertEqual(state.board["-1,-1"].meeple.kind, "field", "farmer remains on board");
+    });
+
+    test("unfinished two-tile city scores one point per tile at game end", function () {
+      const state = cityTurnGame(["G", "E"]);
+      beginTurn(state);
+      assertEqual(selectPending(state, 0, 1), true, "select city tile placement");
+      assertEqual(selectPendingMeeple(state, "city", 0), true, "select city meeple");
+      assertEqual(state.players[0].score, 0, "selection does not score");
+      assertEqual(state.players[0].meeples, 7, "selection does not consume a meeple");
+      assertEqual(confirmPending(state), true, "Confirm tile and meeple");
+      assertEqual(state.board["0,1"].meeple.kind, "city", "Confirm places the selected meeple");
+      assertEqual(state.players[0].meeples, 6, "Confirm consumes a meeple");
+      playTurn(state, -1, 1, 1, null, 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 2, "unfinished city score");
+      assertEndGamePoints(state.players[0], 0, 2, 0);
+      assertEqual(state.players[0].meeples, 7, "returned city meeple");
+    });
+
+    test("River draws ten river tiles, then the lake, then a normal tile", function () {
+      const riverTypes = Array(10).fill("river-straight").concat(["river-lake"]);
+      const state = riverGame(riverTypes, ["B"]);
+      assertEqual(state.board["0,0"].typeId, "river-spring", "spring starts on the board");
+      for (let i = 0; i < 10; i++) playFirstLegalRiverTurn(state);
+
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, "river-lake", "lake is the eleventh river draw");
+      const lakeRotation = state.currentTile.rot;
+      const lakeCells = legalCells(state, "river-lake", lakeRotation);
+      assertEqual(lakeCells.length > 0, true, "lake has a legal placement");
+      assertEqual(selectPending(state, lakeCells[0].x, lakeCells[0].y), true, "place lake pending");
+      assertEqual(confirmPending(state), true, "confirm lake turn");
+
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, "B", "normal tile follows the lake");
+    });
+
+    test("River off keeps the normal start tile and 72-tile base deck", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ]);
+      assertEqual(state.board["0,0"].typeId, "D", "normal start tile is unchanged");
+      assertEqual(state.deck.length, 71, "71 drawn tiles plus the start tile make 72");
+      assertEqual(!!state.riverEnabled, false, "River is disabled");
+    });
+
+    test("river tile placement away from the open end is refused", function () {
+      const state = riverGame(["river-straight", "river-lake"], ["B"]);
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, "river-straight", "draw a straight river tile");
+      rotateCurrent(state, 1);
+      assertEqual(placeCurrent(state, 1, 0), false, "refuse placement that does not continue the river");
+      assertEqual(placeCurrent(state, 0, 1), true, "allow placement at the open river end");
+
+      const blocked = riverGame(["river-straight", "river-lake"], ["B"]);
+      beginTurn(blocked);
+      rotateCurrent(blocked, 1);
+      put(blocked, 0, 2, "river-lake", 0);
+      assertEqual(placeCurrent(blocked, 0, 1), false, "refuse a river placement that points into an occupied square");
+    });
+
+    test("river curves alternate direction and a straight resets the turn rule", function () {
+      const sameTurn = riverGame(["river-curve", "river-curve", "river-lake"], ["B"]);
+      playRiverRotation(sameTurn, "river-curve", 1, null, 0);
+      beginTurn(sameTurn);
+      assertEqual(sameTurn.currentTile.typeId, "river-curve", "draw second curve");
+      rotateCurrent(sameTurn, 1);
+      rotateCurrent(sameTurn, 1);
+      assertEqual(placeCurrent(sameTurn, -1, 1), false, "refuse same-direction second curve");
+      rotateCurrent(sameTurn, 1);
+      assertEqual(selectPending(sameTurn, -1, 1), true, "allow opposite-direction second curve pending");
+      assertEqual(confirmPending(sameTurn), true, "confirm opposite curve");
+
+      const repeatedLeft = riverGame(["river-curve", "river-curve", "river-lake"], ["B"]);
+      playRiverRotation(repeatedLeft, "river-curve", 2, null, 0);
+      beginTurn(repeatedLeft);
+      rotateCurrent(repeatedLeft, 1);
+      assertEqual(placeCurrent(repeatedLeft, 1, 1), false, "refuse repeated left-turn curves");
+
+      const resetTurns = riverGame(
+        ["river-curve", "river-straight", "river-curve", "river-lake"],
+        ["B"]
+      );
+      playRiverRotation(resetTurns, "river-curve", 1, null, 0);
+      playRiverRotation(resetTurns, "river-straight", 0, null, 0);
+      playRiverRotation(resetTurns, "river-curve", 2, null, 0);
+    });
+
+    test("meeples cannot be claimed on the river", function () {
+      const state = riverGame(["river-straight", "river-lake"], ["B"]);
+      beginTurn(state);
+      rotateCurrent(state, 1);
+      const cells = legalCells(state, "river-straight", 1);
+      assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "place river tile pending");
+      assertEqual(selectPendingMeeple(state, "river", 0), false, "river is not a meeple feature");
+      assertEqual(selectPendingMeeple(state, "field", 0), true, "field meeple remains available");
+      assertEqual(confirmPending(state), true, "confirm river tile and field meeple");
+      assertEqual(state.board[keyXY(cells[0].x, cells[0].y)].meeple.kind, "field", "field meeple is placed");
+    });
+
+    test("road completed through a river bridge counts the bridge tile once", function () {
+      const state = riverGame(["river-bridge", "river-lake"], ["A", "A"]);
+      playTurn(state, 0, 1, 0, "road", 0);
+      playTurn(state, 0, 2, 0, null, 0);
+      playTurn(state, -1, 1, 3, null, 0);
+      playTurn(state, 1, 1, 1, null, 0);
+
+      assertEqual(state.players[0].score, 3, "three-tile road scores the bridge once");
+      assertEqual(state.players[0].meeples, 7, "completed bridge road returns its meeple");
+    });
+
+    test("spring-connected river banks refuse a second farmer on the opposite bank", function () {
+      const state = riverGame(["river-straight", "river-lake"], ["B", "B"]);
+      playRiverAt(state, "river-straight", 0, 1, 1, "field", 0);
+      playRiverAt(state, "river-lake", 0, 2, 0, null, 0);
+      playTurn(state, 1, 1, 0, null, 0);
+
+      const eastBank = collectFeature(state, 0, 1, "field", 0);
+      const westBank = collectFeature(state, 0, 1, "field", 1);
+      assertEqual(featureKey(eastBank) === featureKey(westBank), true,
+        "spring and lake join both banks of the river");
+
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, "B", "draw a tile for the opposite bank");
+      assertEqual(selectPending(state, -1, 1), true, "place beside the west bank pending");
+      assertEqual(selectPendingMeeple(state, "field", 0), false,
+        "refuse a farmer in the field already occupied from the other bank");
+    });
+
+    test("exact river layout refuses a farmer in the red farmer's connected field", function () {
+      const state = riverGame([
+        "river-curve",
+        "river-straight",
+        "river-curve",
+        "river-straight",
+        "river-monastery-road",
+        "river-lake"
+      ], ["K"]);
+      state.current = 1;
+      playRiverAt(state, "river-curve", 0, 1, 2, null, 0);
+      playRiverAt(state, "river-straight", 1, 1, 0, "field", 0);
+      playRiverAt(state, "river-curve", 2, 1, 0, null, 0);
+      playRiverAt(state, "river-straight", 2, 2, 1, null, 0);
+      playRiverAt(state, "river-monastery-road", 2, 3, 1, null, 0);
+      playRiverAt(state, "river-lake", 2, 4, 0, null, 0);
+
+      beginTurn(state);
+      assertEqual(state.currentTile.typeId, "K", "draw the normal city-and-road tile");
+      rotateCurrent(state, 3);
+      assertEqual(selectPending(state, 1, 3), true, "place tile west of the monastery pending");
+      assertEqual(selectPendingMeeple(state, "field", 1), false,
+        "refuse blue's farmer in red's connected field north of the road");
+
+      const debugColors = {};
+      allFieldFeatures(state).forEach(function (field, index) {
+        const color = fieldDebugColor(index);
+        field.nodes.forEach(function (node) {
+          debugColors[node.x + "," + node.y + ":" + node.index] = color;
+        });
+      });
+      const redField = collectFeature(state, 1, 1, "field", 0);
+      const colors = redField.nodes.map(function (node) {
+        return debugColors[node.x + "," + node.y + ":" + node.index];
+      });
+      assertEqual(colors.every(function (color) { return color === colors[0]; }), true,
+        "debug fields use the same color on every tile in the connected field");
+    });
+
+    test("standalone straight river tiles connect each bank across the river seam", function () {
+      const state = testState();
+      put(state, 0, 0, "river-straight", 1);
+      put(state, 0, 1, "river-straight", 1);
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "east-bank", typeId: "B" },
+        { uid: "west-bank", typeId: "B" }
+      ];
+      playTurn(state, 1, 0, 0, "field", 0);
+      playTurn(state, -1, 1, 0, "field", 0);
+
+      const eastBank = collectFeature(state, 1, 0, "field", 0);
+      const lowerEastBank = collectFeature(state, 0, 1, "field", 0);
+      const westBank = collectFeature(state, -1, 1, "field", 0);
+      const lowerWestBank = collectFeature(state, 0, 1, "field", 1);
+      assertEqual(featureKey(eastBank) === featureKey(lowerEastBank), true,
+        "east-bank fields connect across the river seam");
+      assertEqual(featureKey(westBank) === featureKey(lowerWestBank), true,
+        "west-bank fields connect across the river seam");
+      assertEqual(featureKey(eastBank) === featureKey(westBank), false,
+        "opposite banks remain separate without a spring or lake");
+    });
+
+    test("River game contains twelve river tiles and the normal tile set", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], undefined, true);
+      assertEqual(state.riverDeck.length + 1, 12, "spring plus remaining river tiles");
+      assertEqual(state.deck.length, INCLUDE_NORMAL_START_IN_RIVER_GAME ? 72 : 71, "normal tile count");
+      assertEqual(state.riverDeck.length + 1 + state.deck.length,
+        INCLUDE_NORMAL_START_IN_RIVER_GAME ? 84 : 83,
+        "combined river and normal tile count");
+      assertEqual(state.deck.some(function (tile) { return tile.typeId === "D"; }),
+        INCLUDE_NORMAL_START_IN_RIVER_GAME,
+        "normal start tile is shuffled into the normal tiles");
+
+      const short = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], 10, true);
+      assertEqual(short.riverDeck.length + 1, 12, "short game keeps every river tile");
+      assertEqual(short.deck.length, 10, "short game limits only normal tiles");
+    });
+
+    test("River tile catalog has the requested field areas and city links", function () {
+      const fieldCounts = {
+        "river-spring": 1,
+        "river-lake": 1,
+        "river-straight": 2,
+        "river-curve": 2,
+        "river-bridge": 4,
+        "river-curve-road": 3,
+        "river-monastery-road": 3,
+        "river-city-road": 4,
+        "river-two-cities": 2,
+        "river-city-corner": 2
+      };
+      Object.keys(fieldCounts).forEach(function (typeId) {
+        assertEqual(RIVER_TILE_TYPES[typeId].fields.length, fieldCounts[typeId],
+          typeId + " field-area count");
+        assertEqual(RIVER_TILE_TYPES[typeId].cities.every(function (city) {
+          return city.pennant === false;
+        }), true, typeId + " has no pennants");
+      });
+      assertEqual(JSON.stringify(RIVER_TILE_TYPES["river-two-cities"].fields.map(function (field) {
+        return field.cityAreas;
+      })), JSON.stringify([[0], [1]]), "each field touches only its own city");
+      assertEqual(JSON.stringify(RIVER_TILE_TYPES["river-city-corner"].fields.map(function (field) {
+        return field.cityAreas;
+      })), JSON.stringify([[0], []]), "only the city-side corner field touches the city");
+    });
+
+    test("River monastery and field meeple spots use their river-tile positions", function () {
+      testDrawnSpotTap("river-monastery-road", 0, "monastery", 0);
+      testDrawnSpotTap("river-monastery-road", 0, "field", 0);
+    });
+
+    test("River tile meeple spots remain distinct in every rotation", function () {
+      Object.keys(RIVER_TILE_TYPES).forEach(function (typeId) {
+        for (let rotation = 0; rotation < 4; rotation++) {
+          const spec = rotatedType(typeId, rotation);
+          const spots = [];
+          spec.cities.forEach(function (feature) {
+            spots.push({ kind: "city", feature: feature });
+          });
+          spec.roads.forEach(function (feature) {
+            spots.push({ kind: "road", feature: feature });
+          });
+          if (spec.monastery) {
+            spots.push({ kind: "monastery", feature: { anchor: spec.monasteryAnchor } });
+          }
+          spec.fields.forEach(function (feature) {
+            spots.push({ kind: "field", feature: feature });
+          });
+          const anchors = spots.map(function (spot) {
+            return { kind: spot.kind, point: featureAnchor(spot.kind, spot.feature) };
+          });
+          for (let i = 0; i < anchors.length; i++) {
+            for (let j = i + 1; j < anchors.length; j++) {
+              const distance = Math.hypot(
+                anchors[i].point.x - anchors[j].point.x,
+                anchors[i].point.y - anchors[j].point.y
+              );
+              assertEqual(
+                distance < 0.22,
+                false,
+                typeId + " rotation " + rotation + " " + anchors[i].kind +
+                  " and " + anchors[j].kind + " meeple spots overlap"
+              );
+            }
+          }
+        }
+      });
+    });
+
+    test("shuffled River decks always reach a placeable lake", function () {
+      for (let game = 0; game < 5; game++) {
+        const state = newGame([
+          { name: "Red", color: "#c62828" },
+          { name: "Blue", color: "#1565c0" }
+        ], undefined, true);
+        let turns = 0;
+        while (state.riverOpenEnd && turns < 12) {
+          beginTurn(state);
+          assertEqual(!!RIVER_TILE_TYPES[state.currentTile.typeId], true, "draw a river tile");
+          let placed = false;
+          for (let rotation = 0; rotation < 4; rotation++) {
+            const cells = legalCells(state, state.currentTile.typeId, rotation);
+            if (!cells.length) continue;
+            for (let i = 0; i < rotation; i++) rotateCurrent(state, 1);
+            assertEqual(selectPending(state, cells[0].x, cells[0].y), true, "place drawn river tile pending");
+            assertEqual(confirmPending(state), true, "confirm river tile");
+            placed = true;
+            break;
+          }
+          assertEqual(placed, true, "drawn river tile, including the lake, has a legal placement");
+          turns += 1;
+        }
+        assertEqual(state.riverOpenEnd, null, "lake closes the river");
+        assertEqual(Object.keys(state.board).some(function (key) {
+          return state.board[key].typeId === "river-lake";
+        }), true, "lake is placed on the board");
+      }
+    });
+
+    test("saved River game resumes with its river choice, remaining tiles, and lake", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = riverGame(["river-straight", "river-lake"], ["B"]);
+        playFirstLegalRiverTurn(state);
+        const remainingRiver = JSON.stringify(state.riverDeck);
+        const openEnd = JSON.stringify(state.riverOpenEnd);
+        persist(state);
+
+        const resumed = loadSave();
+        assertEqual(resumed.riverEnabled, true, "River choice is saved");
+        assertEqual(JSON.stringify(resumed.riverDeck), remainingRiver, "remaining river tiles are saved");
+        assertEqual(JSON.stringify(resumed.riverOpenEnd), openEnd, "open river end is saved");
+        assertEqual(resumed.riverDeck[resumed.riverDeck.length - 1].typeId, "river-lake",
+          "lake remains last in the saved river deck");
+        beginTurn(resumed);
+        assertEqual(resumed.currentTile.typeId, "river-lake", "lake is drawn after resuming");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("city scored when completed during play does not score again at game end", function () {
+      const state = testState();
+      put(state, 0, 0, "C", 0, meeple(0, "city", 0));
+      put(state, 0, -1, "E", 2);
+      put(state, 1, 0, "E", 3);
+      put(state, 0, 1, "E", 0);
+      state.players[0].meeples = 6;
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "closing-city", typeId: "E" },
+        { uid: "last-tile", typeId: "B" }
+      ];
+
+      playTurn(state, -1, 0, 1, null, 0);
+      assertEqual(state.players[0].score, 12, "completed city scores during play");
+      playTurn(state, -2, 0, 0, null, 0);
+
+      assertEqual(state.gameOver, true, "last tile ends the game");
+      assertEqual(state.players[0].score, 12, "completed city is not scored twice");
+      assertEndGamePoints(state.players[0], 0, 0, 0);
+    });
+
+    document.getElementById("summary").textContent =
+      passed + " passed, " + failed + " failed.";
+  </script>
+</body>
+</html>
