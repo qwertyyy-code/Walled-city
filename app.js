@@ -89,17 +89,40 @@ document.getElementById("farmer-tied-points").textContent = String(FARM_POINTS_P
 
 let playerCount = 2;
 let names = ["", "", "", "", ""];
+let computers = [false, false, false, false, false];
 let state = null;
-const shortGameTileLimit = new URLSearchParams(window.location.search).get("tiles") === "10"
+const query = new URLSearchParams(window.location.search);
+const shortGameTileLimit = query.get("tiles") === "10"
   ? 10
   : undefined;
-const debugFields = new URLSearchParams(window.location.search).get("debug") === "fields";
+const debugFields = query.get("debug") === "fields";
+const autoplay = query.get("autoplay") === "1";
+const gameSeed = query.get("seed");
+let gameRandom = Math.random;
 const cam = { x: 0, y: 0, scale: 1, tile: 96 };
 const pointers = new Map();
 let pinch = null;
 let hover = null;
 let legal = [];
 let didPan = false;
+let computerTimer = null;
+let computerWaiting = false;
+let computerActive = false;
+
+if (gameSeed !== null) {
+  gameRandom = createSeededRandom(gameSeed);
+  setBotRandom(gameRandom);
+}
+
+function isComputerPlayer(index) {
+  return !!(state && state.players[index] &&
+    (autoplay || state.players[index].computer));
+}
+
+function resetGameRandom() {
+  gameRandom = gameSeed === null ? Math.random : createSeededRandom(gameSeed);
+  setBotRandom(gameRandom);
+}
 
 function show(screen) {
   [ui.start, ui.handoff, ui.play, ui.end].forEach(function (el) {
@@ -119,13 +142,30 @@ function renderSetup() {
     const inp = document.createElement("input");
     inp.type = "text";
     inp.maxLength = 16;
-    inp.placeholder = PLAYER_COLORS[i].name + " player";
+    const computerCountBefore = computers.slice(0, i).filter(Boolean).length;
+    inp.placeholder = computers[i]
+      ? "Computer " + (computerCountBefore + 1)
+      : PLAYER_COLORS[i].name + " player";
     inp.value = names[i];
     inp.addEventListener("input", function () {
       names[i] = inp.value;
     });
+    const type = document.createElement("select");
+    type.setAttribute("aria-label", "Player " + (i + 1) + " type");
+    [["human", "Human"], ["computer", "Computer"]].forEach(function (option) {
+      const item = document.createElement("option");
+      item.value = option[0];
+      item.textContent = option[1];
+      type.appendChild(item);
+    });
+    type.value = computers[i] ? "computer" : "human";
+    type.addEventListener("change", function () {
+      computers[i] = type.value === "computer";
+      renderSetup();
+    });
     row.appendChild(sw);
     row.appendChild(inp);
+    row.appendChild(type);
     ui.fields.appendChild(row);
   }
   ui.resume.disabled = !loadSave();
@@ -142,14 +182,24 @@ document.getElementById("p-plus").onclick = function () {
 
 document.getElementById("btn-new").onclick = function () {
   const setup = [];
+  let computerCount = 0;
   for (let i = 0; i < playerCount; i++) {
+    const computer = autoplay || computers[i];
+    if (computer) computerCount += 1;
+    const defaultName = computer
+      ? "Computer " + computerCount
+      : PLAYER_COLORS[i].name;
     setup.push({
-      name: (names[i] || PLAYER_COLORS[i].name).trim(),
-      color: PLAYER_COLORS[i].hex
+      name: names[i].trim() || defaultName,
+      color: PLAYER_COLORS[i].hex,
+      computer: computer
     });
   }
-  state = newGame(setup, shortGameTileLimit, ui.river.checked);
-  goHandoff();
+  resetGameRandom();
+  state = newGame(setup, shortGameTileLimit, ui.river.checked, gameRandom);
+  if (isComputerPlayer(state.current)) startComputerTurn(false);
+  else if (shouldShowHandoff(state)) goHandoff();
+  else startHumanTurn();
 };
 
 ui.resume.onclick = function () {
@@ -166,7 +216,12 @@ ui.resume.onclick = function () {
     persist(state);
     goEnd();
   }
-  else if (state.phase === "handoff") goHandoff();
+  else if (isComputerPlayer(state.current) && state.phase === "handoff") {
+    startComputerTurn(false);
+  }
+  else if (state.phase === "handoff" && shouldShowHandoff(state)) goHandoff();
+  else if (state.phase === "handoff") startHumanTurn();
+  else if (isComputerPlayer(state.current)) startComputerTurn(true);
   else goPlay();
   updateTurnUndoButtons();
 };
@@ -188,10 +243,99 @@ ui.backResults.onclick = function () {
 
 document.getElementById("handoff-tap").onclick = function () {
   if (!state || state.phase !== "handoff") return;
+  startHumanTurn();
+};
+
+function startHumanTurn() {
+  if (!state) return;
   beginTurn(state);
   if (state.gameOver) goEnd();
   else goPlay();
-};
+}
+
+function continueAfterTurn(previousWasComputer) {
+  if (!state || state.gameOver) {
+    goEnd();
+    return;
+  }
+  if (isComputerPlayer(state.current)) {
+    if (autoplay || previousWasComputer) {
+      startComputerTurn(false);
+      return;
+    }
+    computerWaiting = true;
+    goPlay();
+    ui.hint.textContent = state.players[state.current].name + " will play shortly. Undo to take back your turn.";
+    computerTimer = window.setTimeout(function () {
+      computerTimer = null;
+      startComputerTurn(false);
+    }, 1500);
+    return;
+  }
+  if (shouldShowHandoff(state)) goHandoff();
+  else startHumanTurn();
+}
+
+function startComputerTurn(resumeExisting) {
+  if (!state || state.gameOver) return;
+  if (computerTimer !== null) {
+    window.clearTimeout(computerTimer);
+    computerTimer = null;
+  }
+  computerWaiting = false;
+  computerActive = true;
+  state.undo = null;
+  if (!resumeExisting || state.phase !== "place") beginTurn(state);
+  if (state.gameOver) {
+    computerActive = false;
+    goEnd();
+    return;
+  }
+  goPlay();
+  const playerIndex = state.current;
+  const player = state.players[playerIndex];
+  const move = chooseMove(state, playerIndex);
+  if (!move) {
+    computerActive = false;
+    console.error("Computer could not find a legal move for a placeable tile.");
+    ui.hint.textContent = "Computer could not find a legal move.";
+    return;
+  }
+  const rotationSteps = (move.rotation - state.currentTile.rot + 4) % 4;
+  for (let i = 0; i < rotationSteps; i++) rotateCurrent(state, 1);
+  if (!selectPending(state, move.x, move.y) ||
+      (move.meepleSpot && !selectPendingMeeple(
+        state,
+        move.meepleSpot.kind,
+        move.meepleSpot.index
+      ))) {
+    computerActive = false;
+    console.error("Computer move was rejected by the normal turn functions:", move);
+    ui.hint.textContent = "Computer move could not be applied.";
+    return;
+  }
+  refreshPlay();
+  ui.turn.textContent = player.name + " is playing...";
+  if (autoplay) {
+    finishComputerTurn();
+  } else {
+    computerTimer = window.setTimeout(finishComputerTurn, 1000);
+  }
+}
+
+function finishComputerTurn() {
+  computerTimer = null;
+  if (!computerActive || !state) return;
+  if (!confirmPending(state, false)) {
+    computerActive = false;
+    console.error("Computer move failed the standard confirmation check.");
+    ui.hint.textContent = "Computer move could not be confirmed.";
+    return;
+  }
+  computerActive = false;
+  if (state.gameOver) goEnd();
+  else continueAfterTurn(true);
+}
 
 function goHandoff() {
   const p = state.players[state.current];
@@ -270,6 +414,7 @@ function refreshPlay() {
   ui.turn.innerHTML = readOnly
     ? "Finished board"
     : '<span class="dot" style="background:' + p.color + '"></span>' + p.name;
+  if (computerActive) ui.turn.textContent = p.name + " is playing...";
   ui.left.textContent = readOnly ? "Game finished" : state.riverOpenEnd
     ? state.riverDeck.length + " river tiles · " + state.deck.length + " normal tiles left"
     : state.deck.length + " tiles left";
@@ -281,9 +426,9 @@ function refreshPlay() {
     ui.meeples.appendChild(chip);
   });
 
-  ui.rotate.disabled = readOnly || state.phase !== "place";
-  ui.undo.disabled = readOnly || !state.undo;
-  ui.confirm.disabled = readOnly || state.phase !== "place" || !state.pending;
+  ui.rotate.disabled = readOnly || computerActive || state.phase !== "place";
+  ui.undo.disabled = readOnly || computerActive || !state.undo;
+  ui.confirm.disabled = readOnly || computerActive || state.phase !== "place" || !state.pending;
   ui.backResults.hidden = !readOnly;
 
   if (state.phase === "place") {
@@ -463,21 +608,26 @@ function hitMeeple(sx, sy) {
 }
 
 ui.rotate.onclick = function () {
-  if (!state || state.gameOver) return;
+  if (!state || state.gameOver || computerActive || computerWaiting) return;
   const rotated = rotateCurrent(state, 1);
   refreshPlay();
   if (!rotated && state.pending) ui.hint.textContent = "Only one way fits here";
 };
 ui.undo.onclick = function () {
-  if (!state || state.gameOver) return;
-  undoLast(state);
+  if (!state || state.gameOver || computerActive) return;
+  if (computerWaiting) {
+    if (computerTimer !== null) window.clearTimeout(computerTimer);
+    computerTimer = null;
+    computerWaiting = false;
+  }
+  if (!undoLast(state)) return;
   refreshPlay();
 };
 ui.confirm.onclick = function () {
-  if (!state || state.gameOver) return;
-  if (confirmPending(state)) {
+  if (!state || state.gameOver || computerActive || computerWaiting) return;
+  if (confirmPending(state, !isComputerPlayer(state.current))) {
     if (state.gameOver) goEnd();
-    else goHandoff();
+    else continueAfterTurn(false);
   } else {
     ui.hint.textContent = "Placement or meeple is no longer legal. Adjust your choice and try again.";
   }
@@ -572,7 +722,7 @@ ui.board.addEventListener("pointerup", function (ev) {
 ui.board.addEventListener("pointercancel", endPointer);
 
 function onTap(sx, sy) {
-  if (!state || state.gameOver) return;
+  if (!state || state.gameOver || computerActive || computerWaiting) return;
   if (state.phase === "place") {
     const g = screenToGrid(cam, sx, sy);
     if (state.pending) {
@@ -616,3 +766,4 @@ window.addEventListener("resize", function () {
 });
 
 renderSetup();
+if (autoplay) document.getElementById("btn-new").click();

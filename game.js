@@ -31,6 +31,7 @@ function emptyState() {
     version: 1,
     players: [],
     scoreLog: [],
+    scoreHistory: [],
     current: 0,
     phase: "start",
     deck: [],
@@ -51,14 +52,15 @@ function emptyState() {
   };
 }
 
-function newGame(playerSetup, tileLimit, riverEnabled) {
+function newGame(playerSetup, tileLimit, riverEnabled, rng) {
   const withRiver = !!riverEnabled;
-  const pack = makeDeck(tileLimit, withRiver);
+  const pack = makeDeck(tileLimit, withRiver, rng);
   const state = emptyState();
   state.players = playerSetup.map(function (p) {
     return {
       name: p.name,
       color: p.color,
+      computer: !!p.computer,
       meeples: 7,
       score: 0,
       endGamePoints: emptyEndGamePoints()
@@ -67,7 +69,7 @@ function newGame(playerSetup, tileLimit, riverEnabled) {
   state.deck = pack.deck;
   state.riverEnabled = withRiver;
   if (withRiver) {
-    state.riverDeck = makeRiverDeck();
+    state.riverDeck = makeRiverDeck(rng);
     state.riverOpenEnd = { x: 0, y: 1, incomingEdge: N };
     state.board[keyXY(0, 0)] = {
       uid: RIVER_SPRING_ID,
@@ -127,6 +129,14 @@ function loadSave() {
       }
     });
     if (!Array.isArray(state.scoreLog)) state.scoreLog = [];
+    if (!Array.isArray(state.scoreHistory)) {
+      state.scoreHistory = state.players.map(function (player, index) {
+        return { player: index, points: player.score };
+      }).filter(function (entry) { return entry.points > 0; });
+    }
+    state.players.forEach(function (player) {
+      player.computer = !!player.computer;
+    });
     state.finalScored = !!state.finalScored;
     return state;
   } catch (err) {
@@ -136,6 +146,12 @@ function loadSave() {
 
 function clearSave() {
   localStorage.removeItem(SAVE_KEY);
+}
+
+function shouldShowHandoff(state) {
+  return !!state && state.players[state.current] &&
+    !state.players[state.current].computer &&
+    state.players.filter(function (player) { return !player.computer; }).length > 1;
 }
 
 function boardTile(state, x, y) {
@@ -350,6 +366,7 @@ function snapshot(state) {
     phase: state.phase,
     meeplePicked: state.meeplePicked,
     scoreLog: state.scoreLog,
+    scoreHistory: state.scoreHistory,
     gameOver: state.gameOver,
     finalScored: state.finalScored
   });
@@ -368,6 +385,7 @@ function restoreSnap(state, snap) {
   state.phase = snap.phase;
   state.meeplePicked = snap.meeplePicked;
   state.scoreLog = snap.scoreLog || [];
+  state.scoreHistory = snap.scoreHistory || [];
   state.gameOver = !!snap.gameOver;
   state.finalScored = !!snap.finalScored;
 }
@@ -966,13 +984,22 @@ function scoreUnfinishedFeatures(state, endGame) {
 
 function finishGame(state) {
   if (state.finalScored) return;
+  const scores = state.players.map(function (player) { return player.score; });
   const logs = scoreCompletedFeatures(state)
     .concat(scoreUnfinishedFeatures(state, true), scoreFarms(state));
+  recordScoreChanges(state, scores);
   state.scoreLog = logs.length ? logs : ["No road, city, monastery, or farm scored at the end of the game."];
   state.finalScored = true;
   state.gameOver = true;
   state.phase = "end";
   state.currentTile = null;
+}
+
+function recordScoreChanges(state, previousScores) {
+  state.players.forEach(function (player, index) {
+    const points = player.score - previousScores[index];
+    if (points > 0) state.scoreHistory.push({ player: index, points: points });
+  });
 }
 
 function meepleOptions(state) {
@@ -1027,6 +1054,7 @@ function undoLast(state) {
 
 function confirmTurn(state, preserveUndo) {
   if (state.phase !== "meeple" || !state.placed || !state.meeplePicked) return false;
+  const scores = state.players.map(function (player) { return player.score; });
   const monasteryLogs = scoreCompletedMonasteriesAround(state, state.placed.x, state.placed.y);
   state.currentTile = null;
   state.placed = null;
@@ -1041,6 +1069,7 @@ function confirmTurn(state, preserveUndo) {
   if (state.deck.length === 0) {
     const endLogs = scoreUnfinishedFeatures(state, true).concat(scoreFarms(state));
     logs.push.apply(logs, endLogs);
+    recordScoreChanges(state, scores);
     state.scoreLog = logs.length ? logs : ["No road, city, or monastery scored this turn."];
     state.finalScored = true;
     state.gameOver = true;
@@ -1048,6 +1077,7 @@ function confirmTurn(state, preserveUndo) {
     persist(state);
     return true;
   }
+  recordScoreChanges(state, scores);
   state.scoreLog = logs.length ? logs : ["No road, city, or monastery scored this turn."];
   state.current = (state.current + 1) % state.players.length;
   state.phase = "handoff";
@@ -1055,7 +1085,7 @@ function confirmTurn(state, preserveUndo) {
   return true;
 }
 
-function confirmPending(state) {
+function confirmPending(state, preserveUndo) {
   if (state.phase !== "place" || !state.pending || !state.currentTile) return false;
   const x = state.pending.x;
   const y = state.pending.y;
@@ -1071,5 +1101,5 @@ function confirmPending(state) {
   } else {
     chooseNoMeeple(state);
   }
-  return confirmTurn(state, true);
+  return confirmTurn(state, preserveUndo !== false);
 }

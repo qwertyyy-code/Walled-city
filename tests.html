@@ -14,11 +14,12 @@
 </head>
 <body>
   <h1>Game checks</h1>
-  <p>These checks cover tile placement, River rules, feature completion, majority ties, meeple return, and end-game scoring.</p>
+  <p>These checks cover tile placement, River rules, computer moves and autoplay, feature completion, majority ties, meeple return, Undo, resume, and end-game scoring.</p>
   <ol id="results"></ol>
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script src="game.js"></script>
+  <script src="bot.js"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -1436,7 +1437,7 @@
       const state = newGame([
         { name: "Red", color: "#c62828" },
         { name: "Blue", color: "#1565c0" }
-      ], 10);
+      ], 10, false, createSeededRandom("short-game-test"));
       for (let turn = 0; turn < 10; turn++) {
         beginTurn(state);
         assertEqual(state.gameOver, false, "draw a placeable tile");
@@ -2161,6 +2162,160 @@
       assertEqual(state.gameOver, true, "last tile ends the game");
       assertEqual(state.players[0].score, 12, "completed city is not scored twice");
       assertEndGamePoints(state.players[0], 0, 0, 0);
+    });
+
+    function runAutoplay(seed, riverEnabled) {
+      const random = createSeededRandom(seed);
+      setBotRandom(random);
+      const state = newGame([
+        { name: "Computer 1", color: "#c62828", computer: true },
+        { name: "Computer 2", color: "#1565c0", computer: true }
+      ], undefined, riverEnabled, random);
+      let turns = 0;
+      while (!state.gameOver && turns < 100) {
+        beginTurn(state);
+        if (state.gameOver) break;
+        const move = chooseMove(state, state.current);
+        assertEqual(!!move, true, "computer finds a legal placement");
+        for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
+        assertEqual(selectPending(state, move.x, move.y), true, "computer selects legal square");
+        if (move.meepleSpot) {
+          assertEqual(selectPendingMeeple(
+            state,
+            move.meepleSpot.kind,
+            move.meepleSpot.index
+          ), true, "computer selects legal meeple spot");
+        }
+        assertEqual(confirmPending(state, false), true, "computer confirms through normal turn flow");
+        turns += 1;
+      }
+      assertEqual(state.gameOver, true, "autoplay ends normally");
+      assertEqual(turns < 100, true, "autoplay completes before turn limit");
+      assertEqual(validateBoard(state).length, 0, "finished board validates");
+      state.players.forEach(function (player) {
+        assertEqual(player.meeples >= 0 && player.meeples <= 7, true, "meeple count stays in bounds");
+      });
+      state.players.forEach(function (player, playerIndex) {
+        const loggedPoints = state.scoreHistory.filter(function (entry) {
+          return entry.player === playerIndex;
+        }).reduce(function (total, entry) { return total + entry.points; }, 0);
+        assertEqual(loggedPoints, player.score, player.name + " scoring log matches final score");
+      });
+      return state;
+    }
+
+    test("chooseMove never changes game state", function () {
+      const random = createSeededRandom("immutability");
+      setBotRandom(random);
+      const state = newGame([
+        { name: "Computer", color: "#c62828", computer: true },
+        { name: "Human", color: "#1565c0" }
+      ], 10, false, random);
+      beginTurn(state);
+      const before = JSON.stringify(state);
+      chooseMove(state, state.current);
+      assertEqual(JSON.stringify(state), before, "chooser leaves the game untouched");
+    });
+
+    test("every chooseMove result is legal by the game rules APIs", function () {
+      const random = createSeededRandom("legal-moves");
+      setBotRandom(random);
+      const state = newGame([
+        { name: "Computer", color: "#c62828", computer: true },
+        { name: "Human", color: "#1565c0" }
+      ], 10, false, random);
+      beginTurn(state);
+      for (let i = 0; i < 20; i++) {
+        const move = chooseMove(state, state.current);
+        assertEqual(legalRotationsAt(state, state.currentTile.typeId, move.x, move.y)
+          .indexOf(move.rotation) >= 0, true, "rotation is legal at selected square");
+        if (move.meepleSpot) {
+          const pending = Object.assign({}, state, {
+            phase: "place",
+            pending: { x: move.x, y: move.y },
+            currentTile: Object.assign({}, state.currentTile, { rot: move.rotation })
+          });
+          assertEqual(pendingMeepleOptions(pending).some(function (spot) {
+            return spot.kind === move.meepleSpot.kind && spot.index === move.meepleSpot.index;
+          }), true, "meeple spot is legal");
+        }
+        state.currentTile.typeId = makeDeck().deck[i].typeId;
+      }
+    });
+
+    test("20 seeded autoplay games finish, validate, and account for all points", function () {
+      for (let seed = 0; seed < 20; seed++) {
+        runAutoplay(seed, seed >= 10);
+      }
+    });
+
+    test("same seed produces identical final board and scores", function () {
+      const first = runAutoplay("repeatable", false);
+      const second = runAutoplay("repeatable", false);
+      assertEqual(JSON.stringify(first.board), JSON.stringify(second.board), "final boards match");
+      assertEqual(JSON.stringify(first.players.map(function (player) { return player.score; })),
+        JSON.stringify(second.players.map(function (player) { return player.score; })),
+        "final scores match");
+    });
+
+    test("Undo cancels the computer wait but not a started computer turn", function () {
+      const state = newGame([
+        { name: "Human", color: "#c62828" },
+        { name: "Computer", color: "#1565c0", computer: true }
+      ], 10, false, createSeededRandom("undo-wait"));
+      beginTurn(state);
+      const move = chooseMove(state, state.current);
+      assertEqual(selectPending(state, move.x, move.y), true, "human has a pending tile");
+      assertEqual(confirmPending(state), true, "human confirms");
+      assertEqual(state.current, 1, "computer is next during wait");
+      assertEqual(undoLast(state), true, "Undo before computer starts succeeds");
+      assertEqual(state.current, 0, "Undo restores human turn");
+      assertEqual(!!state.currentTile, true, "Undo restores tile in hand");
+      assertEqual(confirmPending(state), true, "human can confirm again after Undo");
+      assertEqual(state.current, 1, "computer becomes current after reconfirming");
+      beginTurn(state);
+      assertEqual(!!state.undo, false, "starting the computer clears Undo");
+      assertEqual(undoLast(state), false, "Undo after computer starts does nothing");
+    });
+
+    test("Resume restarts a computer turn with its tile in hand", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const random = createSeededRandom("resume-bot");
+        const state = newGame([
+          { name: "Human", color: "#c62828" },
+          { name: "Computer", color: "#1565c0", computer: true }
+        ], 10, false, random);
+        state.current = 1;
+        beginTurn(state);
+        const tileInHand = JSON.stringify(state.currentTile);
+        const move = chooseMove(state, state.current);
+        assertEqual(selectPending(state, move.x, move.y), true, "computer creates a pending placement");
+        persist(state);
+        const resumed = loadSave();
+        assertEqual(resumed.current, 1, "computer remains the current player");
+        assertEqual(resumed.players[1].computer, true, "computer choice is saved");
+        assertEqual(resumed.phase, "place", "resume restores the placement phase");
+        assertEqual(JSON.stringify(resumed.currentTile), tileInHand, "drawn tile stays in hand");
+        assertEqual(resumed.pending, null, "partial placement is discarded");
+        assertEqual(!!chooseMove(resumed, resumed.current), true, "computer can restart the turn");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("one human and one computer do not require a handoff screen", function () {
+      const state = newGame([
+        { name: "Human", color: "#c62828" },
+        { name: "Computer", color: "#1565c0", computer: true }
+      ], 10, false);
+      assertEqual(shouldShowHandoff(state), false, "initial human turn skips handoff");
+      state.current = 1;
+      assertEqual(shouldShowHandoff(state), false, "computer turn skips handoff");
+      state.current = 0;
+      state.players.push({ name: "Human 2", color: "#2e7d32", computer: false });
+      assertEqual(shouldShowHandoff(state), true, "two human players retain handoff");
     });
 
     document.getElementById("summary").textContent =

@@ -533,7 +533,7 @@ function fisherYates(arr, rng) {
   return arr;
 }
 
-function makeDeck(tileLimit, riverGame) {
+function makeDeck(tileLimit, riverGame, rng) {
   const rest = [];
   let start = null;
   Object.keys(TILE_TYPES).forEach(function (id) {
@@ -545,14 +545,14 @@ function makeDeck(tileLimit, riverGame) {
     }
   });
   if (riverGame && INCLUDE_NORMAL_START_IN_RIVER_GAME) rest.push(start);
-  fisherYates(rest);
+  fisherYates(rest, rng);
   if (Number.isInteger(tileLimit) && tileLimit >= 0) {
     rest.length = Math.min(rest.length, tileLimit);
   }
   return { start: start, deck: rest };
 }
 
-function makeRiverDeck() {
+function makeRiverDeck(rng) {
   const riverTiles = [];
   Object.keys(RIVER_TILE_TYPES).forEach(function (id) {
     if (id === RIVER_SPRING_ID || id === RIVER_LAKE_ID) return;
@@ -560,7 +560,7 @@ function makeRiverDeck() {
       riverTiles.push({ uid: id + "-" + i, typeId: id });
     }
   });
-  fisherYates(riverTiles);
+  fisherYates(riverTiles, rng);
   riverTiles.push({ uid: RIVER_LAKE_ID, typeId: RIVER_LAKE_ID });
   return riverTiles;
 }

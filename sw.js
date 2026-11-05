@@ -1,13 +1,14 @@
 /*
  * sw.js — Caches every app file so the game works offline after first load.
  */
-const CACHE = "walled-city-v27";
+const CACHE = "walled-city-v28";
 const FILES = [
   "./",
   "./index.html",
   "./styles.css",
   "./tiles.js",
   "./game.js",
+  "./bot.js",
   "./render.js",
   "./app.js",
   "./manifest.json",
