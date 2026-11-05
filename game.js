@@ -109,6 +109,15 @@ function persist(state) {
   }
 }
 
+function saveForHome(state) {
+  persist(state);
+}
+
+function createNewGameIfConfirmed(playerSetup, tileLimit, riverEnabled, rng, replaceSavedGame) {
+  if (loadSave() && !replaceSavedGame) return null;
+  return newGame(playerSetup, tileLimit, riverEnabled, rng);
+}
+
 function loadSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);

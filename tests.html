@@ -14,7 +14,7 @@
 </head>
 <body>
   <h1>Game checks</h1>
-  <p>These checks cover tile placement, River rules, computer moves and autoplay, feature completion, majority ties, meeple return, Undo, resume, and end-game scoring.</p>
+  <p>These checks cover tile placement, River rules, computer moves and autoplay, Home and Resume, saved-game replacement, feature completion, majority ties, meeple return, Undo, and end-game scoring.</p>
   <ol id="results"></ol>
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
@@ -2316,6 +2316,170 @@
       state.current = 0;
       state.players.push({ name: "Human 2", color: "#2e7d32", computer: false });
       assertEqual(shouldShowHandoff(state), true, "two human players retain handoff");
+    });
+
+    test("Home and Resume preserve the in-progress game state", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "Red", color: "#c62828" },
+          { name: "Blue", color: "#1565c0" }
+        ], 10, false, createSeededRandom("home-game"));
+        beginTurn(state);
+        state.players[0].score = 4;
+        state.players[1].meeples = 5;
+        const before = {
+          board: JSON.stringify(state.board),
+          scores: JSON.stringify(state.players.map(function (player) { return player.score; })),
+          meeples: JSON.stringify(state.players.map(function (player) { return player.meeples; })),
+          current: state.current,
+          tile: JSON.stringify(state.currentTile)
+        };
+        saveForHome(state);
+        const resumed = loadSave();
+        assertEqual(JSON.stringify(resumed.board), before.board, "board is preserved");
+        assertEqual(JSON.stringify(resumed.players.map(function (player) { return player.score; })),
+          before.scores, "scores are preserved");
+        assertEqual(JSON.stringify(resumed.players.map(function (player) { return player.meeples; })),
+          before.meeples, "meeple counts are preserved");
+        assertEqual(resumed.current, before.current, "current player is preserved");
+        assertEqual(JSON.stringify(resumed.currentTile), before.tile, "tile in hand is preserved");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("Home with a selected pending meeple saves the tile in hand unselected", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "Red", color: "#c62828" },
+          { name: "Blue", color: "#1565c0" }
+        ], 10, false, createSeededRandom("home-pending"));
+        beginTurn(state);
+        const cell = legalCells(state, state.currentTile.typeId)[0];
+        assertEqual(selectPending(state, cell.x, cell.y), true, "tile is pending");
+        const spots = pendingMeepleOptions(state);
+        if (!spots.length) {
+          const other = newGame([
+            { name: "Red", color: "#c62828" },
+            { name: "Blue", color: "#1565c0" }
+          ], 10, false, createSeededRandom("home-pending-meeple"));
+          beginTurn(other);
+          const legal = legalCells(other, other.currentTile.typeId);
+          let selected = false;
+          for (let i = 0; i < legal.length && !selected; i++) {
+            selectPending(other, legal[i].x, legal[i].y);
+            const options = pendingMeepleOptions(other);
+            if (options.length) {
+              assertEqual(selectPendingMeeple(other, options[0].kind, options[0].index),
+                true, "meeple is selected");
+              saveForHome(other);
+              const resumedOther = loadSave();
+              assertEqual(resumedOther.pending, null, "pending placement is cleared");
+              assertEqual(resumedOther.selectedMeeple, null, "selected meeple is cleared");
+              assertEqual(!!resumedOther.currentTile, true, "tile returns to hand");
+              selected = true;
+            } else {
+              other.pending = null;
+            }
+          }
+          assertEqual(selected, true, "found a legal meeple spot");
+          return;
+        }
+        assertEqual(selectPendingMeeple(state, spots[0].kind, spots[0].index),
+          true, "meeple is selected");
+        const tileInHand = JSON.stringify(state.currentTile);
+        saveForHome(state);
+        const resumed = loadSave();
+        assertEqual(resumed.pending, null, "pending placement is cleared");
+        assertEqual(resumed.selectedMeeple, null, "selected meeple is cleared");
+        assertEqual(JSON.stringify(resumed.currentTile), tileInHand, "tile returns to hand");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("Home during handoff resumes without drawing the next tile", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "Red", color: "#c62828" },
+          { name: "Blue", color: "#1565c0" }
+        ], 10, false, createSeededRandom("home-handoff"));
+        const nextPlayer = state.current;
+        saveForHome(state);
+        const resumed = loadSave();
+        assertEqual(resumed.phase, "handoff", "handoff phase is preserved");
+        assertEqual(resumed.current, nextPlayer, "next player is preserved");
+        assertEqual(resumed.currentTile, null, "next tile remains hidden");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("New game cancellation preserves the save and confirmation replaces it", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const original = newGame([
+          { name: "Original", color: "#c62828" },
+          { name: "Blue", color: "#1565c0" }
+        ], 10, false, createSeededRandom("saved-game"));
+        const originalSave = localStorage.getItem(SAVE_KEY);
+        assertEqual(createNewGameIfConfirmed([
+          { name: "Replacement", color: "#2e7d32" },
+          { name: "Yellow", color: "#f9a825" }
+        ], 10, false, createSeededRandom("cancel"), false), null, "Cancel starts no game");
+        assertEqual(localStorage.getItem(SAVE_KEY), originalSave, "Cancel keeps the saved game");
+        const replacement = createNewGameIfConfirmed([
+          { name: "Replacement", color: "#2e7d32" },
+          { name: "Yellow", color: "#f9a825" }
+        ], 10, false, createSeededRandom("replace"), true);
+        assertEqual(replacement.players[0].name, "Replacement", "Start creates replacement game");
+        assertEqual(loadSave().players[0].name, "Replacement", "replacement is saved");
+        assertEqual(loadSave().players[0].name === original.players[0].name,
+          false, "original save is replaced");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("Home during a computer turn resumes and completes the turn normally", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const random = createSeededRandom("home-computer");
+        const state = newGame([
+          { name: "Human", color: "#c62828" },
+          { name: "Computer", color: "#1565c0", computer: true }
+        ], 10, false, random);
+        state.current = 1;
+        beginTurn(state);
+        const pending = legalCells(state, state.currentTile.typeId)[0];
+        assertEqual(selectPending(state, pending.x, pending.y), true, "computer has pending placement");
+        saveForHome(state);
+        const resumed = loadSave();
+        const move = chooseMove(resumed, resumed.current);
+        assertEqual(!!move, true, "computer selects a move after Resume");
+        for (let i = 0; i < move.rotation; i++) rotateCurrent(resumed, 1);
+        assertEqual(selectPending(resumed, move.x, move.y), true, "computer places via turn API");
+        if (move.meepleSpot) {
+          assertEqual(selectPendingMeeple(
+            resumed,
+            move.meepleSpot.kind,
+            move.meepleSpot.index
+          ), true, "computer selects a legal meeple spot");
+        }
+        assertEqual(confirmPending(resumed, false), true, "computer completes a normal turn");
+        assertEqual(resumed.current, 0, "turn advances to human");
+        assertEqual(resumed.phase, "handoff", "completed computer turn reaches handoff phase");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
     });
 
     document.getElementById("summary").textContent =

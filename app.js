@@ -9,6 +9,10 @@ const ui = {
   end: document.getElementById("end-screen"),
   fields: document.getElementById("player-fields"),
   pCount: document.getElementById("p-count"),
+  newGame: document.getElementById("btn-new"),
+  newGameDialog: document.getElementById("new-game-dialog"),
+  newGameCancel: document.getElementById("btn-new-cancel"),
+  newGameStart: document.getElementById("btn-new-start"),
   river: document.getElementById("river-option"),
   riverScoringRule: document.getElementById("river-scoring-rule"),
   resume: document.getElementById("btn-resume"),
@@ -24,6 +28,9 @@ const ui = {
   endUndo: document.getElementById("btn-end-undo"),
   confirm: document.getElementById("btn-confirm"),
   backResults: document.getElementById("btn-back-results"),
+  home: document.getElementById("btn-home"),
+  homeHandoff: document.getElementById("btn-home-handoff"),
+  homeEnd: document.getElementById("btn-home-end"),
   viewBoard: document.getElementById("btn-view-board"),
   handoffTitle: document.getElementById("handoff-title"),
   handoffDot: document.getElementById("handoff-dot"),
@@ -108,6 +115,7 @@ let didPan = false;
 let computerTimer = null;
 let computerWaiting = false;
 let computerActive = false;
+const GAME_HISTORY_KEY = "walledCityGame";
 
 if (gameSeed !== null) {
   gameRandom = createSeededRandom(gameSeed);
@@ -180,7 +188,7 @@ document.getElementById("p-plus").onclick = function () {
   renderSetup();
 };
 
-document.getElementById("btn-new").onclick = function () {
+function makePlayerSetup() {
   const setup = [];
   let computerCount = 0;
   for (let i = 0; i < playerCount; i++) {
@@ -195,11 +203,40 @@ document.getElementById("btn-new").onclick = function () {
       computer: computer
     });
   }
+  return setup;
+}
+
+function startConfiguredGame(replaceSavedGame) {
   resetGameRandom();
-  state = newGame(setup, shortGameTileLimit, ui.river.checked, gameRandom);
+  state = createNewGameIfConfirmed(
+    makePlayerSetup(),
+    shortGameTileLimit,
+    ui.river.checked,
+    gameRandom,
+    replaceSavedGame
+  );
+  if (!state) return;
+  pushGameHistory();
   if (isComputerPlayer(state.current)) startComputerTurn(false);
   else if (shouldShowHandoff(state)) goHandoff();
   else startHumanTurn();
+}
+
+ui.newGame.onclick = function () {
+  if (!autoplay && loadSave()) {
+    ui.newGameDialog.showModal();
+    return;
+  }
+  startConfiguredGame(autoplay);
+};
+
+ui.newGameCancel.onclick = function () {
+  ui.newGameDialog.close();
+};
+
+ui.newGameStart.onclick = function () {
+  ui.newGameDialog.close();
+  startConfiguredGame(true);
 };
 
 ui.resume.onclick = function () {
@@ -223,13 +260,54 @@ ui.resume.onclick = function () {
   else if (state.phase === "handoff") startHumanTurn();
   else if (isComputerPlayer(state.current)) startComputerTurn(true);
   else goPlay();
+  pushGameHistory();
   updateTurnUndoButtons();
 };
 
-document.getElementById("btn-home").onclick = function () {
+function pushGameHistory() {
+  if (history.state && history.state[GAME_HISTORY_KEY]) return;
+  history.pushState({
+    [GAME_HISTORY_KEY]: true,
+    previousState: history.state
+  }, "", window.location.href);
+}
+
+function cancelComputerTurn() {
+  if (computerTimer !== null) {
+    window.clearTimeout(computerTimer);
+    computerTimer = null;
+  }
+  computerWaiting = false;
+  computerActive = false;
+}
+
+function showHome(fromBackNavigation) {
+  cancelComputerTurn();
+  if (state) saveForHome(state);
   show(ui.start);
   renderSetup();
+  if (!fromBackNavigation && history.state && history.state[GAME_HISTORY_KEY]) {
+    history.back();
+  }
+}
+
+ui.home.onclick = function () {
+  showHome(false);
 };
+
+ui.homeHandoff.onclick = function (event) {
+  event.stopPropagation();
+  showHome(false);
+};
+
+ui.homeEnd.onclick = function () {
+  showHome(false);
+};
+
+window.addEventListener("popstate", function () {
+  if (!state || ui.start.classList.contains("active")) return;
+  showHome(true);
+});
 
 ui.viewBoard.onclick = function () {
   if (!state || !state.gameOver) return;

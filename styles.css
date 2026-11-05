@@ -217,6 +217,55 @@ input[type="text"] {
   font-size: 0.92rem;
 }
 
+#turn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-top-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.home-button {
+  min-width: 76px;
+  min-height: 44px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.55);
+  color: var(--ink);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.handoff-home {
+  position: absolute;
+  z-index: 1;
+  top: max(10px, env(safe-area-inset-top));
+  right: 12px;
+}
+
+.confirm-dialog {
+  width: min(calc(100% - 32px), 360px);
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+}
+
+.confirm-dialog::backdrop { background: rgba(0,0,0,0.45); }
+.confirm-dialog h2 { margin: 0 0 8px; font-size: 1.25rem; }
+.confirm-dialog p { margin: 0 0 18px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.dialog-actions .btn { min-height: 44px; padding: 8px 14px; }
+
 .meeple-row {
   display: flex;
   gap: 8px;

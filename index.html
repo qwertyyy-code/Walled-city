@@ -53,6 +53,7 @@
   </div>
 
   <div id="handoff-screen" class="screen">
+    <button type="button" class="home-button handoff-home" id="btn-home-handoff">⌂ <span>Home</span></button>
     <div class="handoff" id="handoff-tap">
       <div id="handoff-dot" class="dot"></div>
       <h2 id="handoff-title">Your turn</h2>
@@ -81,7 +82,10 @@
     <div class="hud">
       <div class="hud-top">
         <div id="turn-label"></div>
-        <div id="tiles-left"></div>
+        <div class="hud-top-actions">
+          <div id="tiles-left"></div>
+          <button type="button" class="home-button" id="btn-home">⌂ <span>Home</span></button>
+        </div>
       </div>
       <div id="play-scoreboard" class="scoreboard compact"></div>
       <div class="meeple-row" id="meeple-row"></div>
@@ -113,9 +117,18 @@
     <div class="stack">
       <button type="button" class="btn ghost" id="btn-end-undo" hidden>Undo last turn</button>
       <button type="button" class="btn" id="btn-view-board">View board</button>
-      <button type="button" class="btn ghost" id="btn-home">New game</button>
+      <button type="button" class="btn ghost" id="btn-home-end">⌂ Home</button>
     </div>
   </div>
+
+  <dialog id="new-game-dialog" class="confirm-dialog" aria-labelledby="new-game-title">
+    <h2 id="new-game-title">Start a new game?</h2>
+    <p>Your saved game will be lost.</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="btn-new-cancel">Cancel</button>
+      <button type="button" class="btn" id="btn-new-start">Start</button>
+    </div>
+  </dialog>
 
   <button type="button" id="update-notice" class="update-notice" hidden>
     New version, tap to reload
