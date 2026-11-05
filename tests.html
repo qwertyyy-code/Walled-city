@@ -2482,6 +2482,179 @@
       }
     });
 
+    test("human-only setup creates three human players", function () {
+      const players = buildPlayerSetup(false, 3, 1, ["Alice", "Bob", "Cara"]);
+      assertEqual(players.length, 3, "three seats are created");
+      assertEqual(players.every(function (player) { return !player.computer; }), true,
+        "every seat is human");
+      assertEqual(players.map(function (player) { return player.name; }).join(","),
+        "Alice,Bob,Cara", "human names remain in seat order");
+    });
+
+    test("computer setup puts the human before numbered opponents", function () {
+      const players = buildPlayerSetup(true, 4, 2, ["Alice", "Old seat 2"]);
+      assertEqual(players.length, 3, "one human and two computers are created");
+      assertEqual(players[0].name, "Alice", "human remains first");
+      assertEqual(players[0].computer, false, "first seat is human");
+      assertEqual(players[1].name, "Computer 1", "first computer has default name");
+      assertEqual(players[2].name, "Computer 2", "second computer has default name");
+      assertEqual(players[1].computer && players[2].computer, true, "opponents are computers");
+      assertEqual(players[1].color, PLAYER_COLORS[1].hex, "computer gets next seat colour");
+    });
+
+    test("computer opponent count is capped at the maximum player count", function () {
+      const players = buildPlayerSetup(true, 1, 100, ["Alice"]);
+      assertEqual(PLAYER_COLORS.length, 5, "maximum player count");
+      assertEqual(players.length, PLAYER_COLORS.length, "cannot create more than five seats");
+      assertEqual(players.filter(function (player) { return player.computer; }).length, 4,
+        "at most four computer buttons can be selected");
+    });
+
+    test("old mixed human and computer save resumes with its player types", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "Human 1", color: PLAYER_COLORS[0].hex },
+          { name: "Computer 1", color: PLAYER_COLORS[1].hex, computer: true },
+          { name: "Human 2", color: PLAYER_COLORS[2].hex }
+        ], 10, false, createSeededRandom("legacy-mixed-save"));
+        state.current = 1;
+        state.phase = "handoff";
+        const legacySave = JSON.parse(localStorage.getItem(SAVE_KEY));
+        legacySave.players = state.players;
+        legacySave.current = 1;
+        legacySave.phase = "handoff";
+        localStorage.setItem(SAVE_KEY, JSON.stringify(legacySave));
+        const resumed = loadSave();
+        assertEqual(resumed.players[0].computer, false, "first human remains human");
+        assertEqual(resumed.players[1].computer, true, "computer remains computer");
+        assertEqual(resumed.players[2].computer, false, "second human remains human");
+        assertEqual(shouldShowHandoff(resumed), false, "computer's turn skips handoff");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("computer setup with two opponents completes a short game without handoffs", function () {
+      const random = createSeededRandom("three-seat-autoplay");
+      const players = buildPlayerSetup(true, 2, 2, ["Alice"]);
+      const state = newGame(players, 10, false, random);
+      let turns = 0;
+      while (!state.gameOver && turns < 10) {
+        assertEqual(shouldShowHandoff(state), false, "computer game has no handoff screen");
+        beginTurn(state);
+        if (state.gameOver) break;
+        const move = chooseMove(state, state.current);
+        assertEqual(!!move, true, "current player finds a legal move");
+        for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
+        assertEqual(selectPending(state, move.x, move.y), true, "current player selects a legal tile");
+        if (move.meepleSpot) {
+          assertEqual(selectPendingMeeple(
+            state,
+            move.meepleSpot.kind,
+            move.meepleSpot.index
+          ), true, "current player selects a legal spot");
+        }
+        assertEqual(confirmPending(state, false), true, "turn completes normally");
+        turns += 1;
+      }
+      assertEqual(state.gameOver, true, "ten-tile game ends");
+      assertEqual(state.players.length, 3, "one human and two computers are playing");
+    });
+
+    function highlightTestBar(playerCount) {
+      const bar = document.createElement("div");
+      for (let i = 0; i < playerCount; i++) {
+        const entry = document.createElement("div");
+        entry.dataset.playerIndex = String(i);
+        bar.appendChild(entry);
+      }
+      return bar;
+    }
+
+    function assertHighlightMatchesState(bar, state, message) {
+      updateCurrentPlayerHighlight(bar, state.gameOver ? null : state.current, false);
+      const highlighted = Array.from(bar.children).filter(function (entry) {
+        return entry.classList.contains("current-player");
+      });
+      assertEqual(highlighted.length, state.gameOver ? 0 : 1, message + " highlight count");
+      if (!state.gameOver) {
+        assertEqual(Number(highlighted[0].dataset.playerIndex), state.current,
+          message + " highlighted current player");
+      }
+    }
+
+    test("autoplay seed 5 highlights exactly the current player after every turn", function () {
+      const random = createSeededRandom(5);
+      const state = newGame(buildPlayerSetup(false, 2, 1, [], true), 10, false, random);
+      const bar = highlightTestBar(state.players.length);
+      let turns = 0;
+      while (!state.gameOver && turns < 10) {
+        beginTurn(state);
+        if (state.gameOver) break;
+        const move = chooseMove(state, state.current);
+        for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
+        assertEqual(selectPending(state, move.x, move.y), true, "autoplay placement");
+        if (move.meepleSpot) {
+          assertEqual(selectPendingMeeple(
+            state,
+            move.meepleSpot.kind,
+            move.meepleSpot.index
+          ), true, "autoplay meeple");
+        }
+        assertEqual(confirmPending(state, false), true, "autoplay turn");
+        assertHighlightMatchesState(bar, state, "after turn " + turns);
+        turns += 1;
+      }
+      assertEqual(state.gameOver, true, "autoplay game ends");
+      assertHighlightMatchesState(bar, state, "results");
+    });
+
+    test("Undo during the computer wait moves the highlight back to the human", function () {
+      const state = newGame([
+        { name: "Human", color: "#c62828" },
+        { name: "Computer", color: "#1565c0", computer: true }
+      ], 10, false, createSeededRandom("highlight-undo"));
+      const bar = highlightTestBar(state.players.length);
+      beginTurn(state);
+      const cell = legalCells(state, state.currentTile.typeId)[0];
+      assertEqual(selectPending(state, cell.x, cell.y), true, "human placement");
+      assertEqual(confirmPending(state), true, "human confirms");
+      assertEqual(state.current, 1, "computer is next during wait");
+      assertHighlightMatchesState(bar, state, "computer wait");
+      assertEqual(undoLast(state), true, "Undo cancels pending computer turn");
+      assertHighlightMatchesState(bar, state, "after Undo");
+    });
+
+    test("Home and Resume highlight the saved current player", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "Human", color: "#c62828" },
+          { name: "Computer", color: "#1565c0", computer: true }
+        ], 10, false, createSeededRandom("highlight-resume"));
+        state.current = 1;
+        beginTurn(state);
+        saveForHome(state);
+        const resumed = loadSave();
+        const bar = highlightTestBar(resumed.players.length);
+        assertHighlightMatchesState(bar, resumed, "after Resume");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("results screen has no highlighted player", function () {
+      const bar = highlightTestBar(3);
+      updateCurrentPlayerHighlight(bar, 1, false);
+      updateCurrentPlayerHighlight(bar, null, false);
+      assertEqual(Array.from(bar.children).some(function (entry) {
+        return entry.classList.contains("current-player");
+      }), false, "no player is highlighted on results");
+    });
+
     document.getElementById("summary").textContent =
       passed + " passed, " + failed + " failed.";
   </script>

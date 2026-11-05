@@ -113,6 +113,17 @@ function meepleSpotAt(options, spec, x, y, tileSize) {
   return best;
 }
 
+function updateCurrentPlayerHighlight(container, playerIndex, pulsing) {
+  Array.from(container.children).forEach(function (entry) {
+    const active = playerIndex !== null &&
+      Number(entry.dataset.playerIndex) === playerIndex;
+    entry.classList.toggle("current-player", active);
+    entry.classList.toggle("current-player-pulsing", active && !!pulsing);
+    if (active) entry.setAttribute("aria-current", "true");
+    else entry.removeAttribute("aria-current");
+  });
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);

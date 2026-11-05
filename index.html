@@ -20,7 +20,14 @@
       <p>Pass-and-play tile laying. Offline after the first load. Base-game scoring included.</p>
     </div>
     <div class="stack">
-      <label class="row">Players
+      <label class="setup-toggle" for="computer-mode-toggle">
+        <span>Play against the computer</span>
+        <span class="switch">
+          <input type="checkbox" id="computer-mode-toggle" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+      <label class="row" id="human-count-row">Players
         <span class="stepper">
           <button type="button" id="p-minus">−</button>
           <strong id="p-count">2</strong>
@@ -28,6 +35,10 @@
         </span>
       </label>
       <div id="player-fields" class="players"></div>
+      <section id="computer-opponents" class="opponents" hidden>
+        <h2>Computer opponents</h2>
+        <div id="computer-opponent-buttons" class="opponent-buttons"></div>
+      </section>
       <label class="river-option">
         <input type="checkbox" id="river-option">
         <span>Play with the River (12 tiles)</span>

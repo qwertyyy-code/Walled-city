@@ -52,6 +52,33 @@ function emptyState() {
   };
 }
 
+function buildPlayerSetup(computerMode, humanCount, computerOpponentCount, names, autoplay) {
+  const maxPlayers = PLAYER_COLORS.length;
+  const humanSeats = Math.max(2, Math.min(maxPlayers, Math.floor(Number(humanCount) || 2)));
+  const opponents = Math.max(
+    1,
+    Math.min(maxPlayers - 1, Math.floor(Number(computerOpponentCount) || 1))
+  );
+  const count = autoplay
+    ? humanSeats
+    : computerMode
+      ? opponents + 1
+      : humanSeats;
+  const players = [];
+  for (let i = 0; i < count; i++) {
+    const computer = !!autoplay || (!!computerMode && i > 0);
+    const defaultName = computer
+      ? "Computer " + (autoplay ? i + 1 : i)
+      : PLAYER_COLORS[i].name;
+    players.push({
+      name: computer ? defaultName : ((names && names[i] || "").trim() || defaultName),
+      color: PLAYER_COLORS[i].hex,
+      computer: computer
+    });
+  }
+  return players;
+}
+
 function newGame(playerSetup, tileLimit, riverEnabled, rng) {
   const withRiver = !!riverEnabled;
   const pack = makeDeck(tileLimit, withRiver, rng);

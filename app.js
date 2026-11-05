@@ -9,6 +9,10 @@ const ui = {
   end: document.getElementById("end-screen"),
   fields: document.getElementById("player-fields"),
   pCount: document.getElementById("p-count"),
+  humanCountRow: document.getElementById("human-count-row"),
+  computerMode: document.getElementById("computer-mode-toggle"),
+  computerOpponents: document.getElementById("computer-opponents"),
+  opponentButtons: document.getElementById("computer-opponent-buttons"),
   newGame: document.getElementById("btn-new"),
   newGameDialog: document.getElementById("new-game-dialog"),
   newGameCancel: document.getElementById("btn-new-cancel"),
@@ -94,9 +98,24 @@ document.getElementById("small-city-points").textContent =
 document.getElementById("farmer-points").textContent = String(FARM_POINTS_PER_CITY);
 document.getElementById("farmer-tied-points").textContent = String(FARM_POINTS_PER_CITY);
 
+const SETUP_PREFERENCE_KEY = "walled-city-setup-preference";
 let playerCount = 2;
 let names = ["", "", "", "", ""];
-let computers = [false, false, false, false, false];
+let computerMode = false;
+let computerOpponentCount = 1;
+const setupPreference = localStorage.getItem(SETUP_PREFERENCE_KEY);
+if (setupPreference) {
+  try {
+    const preference = JSON.parse(setupPreference);
+    computerMode = !!preference.computerMode;
+    computerOpponentCount = Math.min(
+      PLAYER_COLORS.length - 1,
+      Math.max(1, Math.floor(Number(preference.computerOpponentCount) || 1))
+    );
+  } catch (error) {
+    console.warn("Could not read setup preference:", error);
+  }
+}
 let state = null;
 const query = new URLSearchParams(window.location.search);
 const shortGameTileLimit = query.get("tiles") === "10"
@@ -141,7 +160,11 @@ function show(screen) {
 function renderSetup() {
   ui.pCount.textContent = String(playerCount);
   ui.fields.innerHTML = "";
-  for (let i = 0; i < playerCount; i++) {
+  ui.humanCountRow.hidden = computerMode;
+  ui.computerOpponents.hidden = !computerMode;
+  ui.computerMode.checked = computerMode;
+  const visiblePlayers = computerMode ? 1 : playerCount;
+  for (let i = 0; i < visiblePlayers; i++) {
     const row = document.createElement("div");
     row.className = "player-row";
     const sw = document.createElement("div");
@@ -150,34 +173,46 @@ function renderSetup() {
     const inp = document.createElement("input");
     inp.type = "text";
     inp.maxLength = 16;
-    const computerCountBefore = computers.slice(0, i).filter(Boolean).length;
-    inp.placeholder = computers[i]
-      ? "Computer " + (computerCountBefore + 1)
-      : PLAYER_COLORS[i].name + " player";
+    inp.placeholder = PLAYER_COLORS[i].name + " player";
     inp.value = names[i];
     inp.addEventListener("input", function () {
       names[i] = inp.value;
     });
-    const type = document.createElement("select");
-    type.setAttribute("aria-label", "Player " + (i + 1) + " type");
-    [["human", "Human"], ["computer", "Computer"]].forEach(function (option) {
-      const item = document.createElement("option");
-      item.value = option[0];
-      item.textContent = option[1];
-      type.appendChild(item);
-    });
-    type.value = computers[i] ? "computer" : "human";
-    type.addEventListener("change", function () {
-      computers[i] = type.value === "computer";
-      renderSetup();
-    });
     row.appendChild(sw);
     row.appendChild(inp);
-    row.appendChild(type);
     ui.fields.appendChild(row);
+  }
+  ui.opponentButtons.innerHTML = "";
+  for (let count = 1; count < PLAYER_COLORS.length; count++) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opponent-count" +
+      (count === computerOpponentCount ? " selected" : "");
+    button.textContent = String(count);
+    button.setAttribute("aria-pressed", String(count === computerOpponentCount));
+    button.setAttribute("aria-label", count + " computer opponents");
+    button.addEventListener("click", function () {
+      computerOpponentCount = count;
+      saveSetupPreference();
+      renderSetup();
+    });
+    ui.opponentButtons.appendChild(button);
   }
   ui.resume.disabled = !loadSave();
 }
+
+function saveSetupPreference() {
+  localStorage.setItem(SETUP_PREFERENCE_KEY, JSON.stringify({
+    computerMode: computerMode,
+    computerOpponentCount: computerOpponentCount
+  }));
+}
+
+ui.computerMode.addEventListener("change", function () {
+  computerMode = ui.computerMode.checked;
+  saveSetupPreference();
+  renderSetup();
+});
 
 document.getElementById("p-minus").onclick = function () {
   playerCount = Math.max(2, playerCount - 1);
@@ -189,21 +224,13 @@ document.getElementById("p-plus").onclick = function () {
 };
 
 function makePlayerSetup() {
-  const setup = [];
-  let computerCount = 0;
-  for (let i = 0; i < playerCount; i++) {
-    const computer = autoplay || computers[i];
-    if (computer) computerCount += 1;
-    const defaultName = computer
-      ? "Computer " + computerCount
-      : PLAYER_COLORS[i].name;
-    setup.push({
-      name: names[i].trim() || defaultName,
-      color: PLAYER_COLORS[i].hex,
-      computer: computer
-    });
-  }
-  return setup;
+  return buildPlayerSetup(
+    computerMode,
+    playerCount,
+    computerOpponentCount,
+    names,
+    autoplay
+  );
 }
 
 function startConfiguredGame(replaceSavedGame) {
@@ -419,7 +446,8 @@ function goHandoff() {
   const p = state.players[state.current];
   ui.handoffTitle.textContent = p.name + "'s turn";
   ui.handoffDot.style.background = p.color;
-  renderScoreboard(ui.handoffScoreboard, false);
+  renderScoreboard(ui.handoffScoreboard, false, state.current);
+  updateCurrentPlayerHighlight(ui.playScoreboard, null, false);
   renderLog(ui.handoffLog, state.scoreLog.length ? state.scoreLog : ["Scores update after your first turn."]);
   show(ui.handoff);
   updateTurnUndoButtons();
@@ -433,6 +461,8 @@ function goEnd() {
     : "Tie: " + winners.map(function (player) { return player.name; }).join(" and ") +
       " finish with " + winners[0].score + " points each.";
   renderScoreboard(ui.endScoreboard, true);
+  updateCurrentPlayerHighlight(ui.playScoreboard, null, false);
+  updateCurrentPlayerHighlight(ui.handoffScoreboard, null, false);
   renderLog(ui.endLog, state.scoreLog);
   show(ui.end);
   updateTurnUndoButtons();
@@ -488,7 +518,8 @@ function refreshPlay() {
     });
   }
   const p = state.players[state.current];
-  renderScoreboard(ui.playScoreboard, false);
+  renderScoreboard(ui.playScoreboard, false, readOnly ? null : state.current, computerActive);
+  updateCurrentPlayerHighlight(ui.handoffScoreboard, null, false);
   ui.turn.innerHTML = readOnly
     ? "Finished board"
     : '<span class="dot" style="background:' + p.color + '"></span>' + p.name;
@@ -533,7 +564,7 @@ function refreshPlay() {
   redraw();
 }
 
-function renderScoreboard(container, final) {
+function renderScoreboard(container, final, currentPlayerIndex, pulsing) {
   container.innerHTML = "";
   const players = state.players.map(function (player, index) {
     return { player: player, index: index };
@@ -556,6 +587,8 @@ function renderScoreboard(container, final) {
   }
   players.forEach(function (item) {
     const row = document.createElement("div");
+    row.dataset.playerIndex = String(item.index);
+    row.style.setProperty("--player-color", item.player.color);
     row.className = "score-row" + (final ? " final-score-row" : "") +
       (final && item.player.score === players[0].player.score ? " winner" : "");
     const dot = document.createElement("span");
@@ -585,6 +618,11 @@ function renderScoreboard(container, final) {
     }
     container.appendChild(row);
   });
+  updateCurrentPlayerHighlight(
+    container,
+    final ? null : currentPlayerIndex,
+    !final && pulsing
+  );
 }
 
 function renderLog(container, messages) {
