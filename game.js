@@ -121,6 +121,7 @@ function newGame(playerSetup, tileLimit, riverEnabled, rng) {
 }
 
 function persist(state) {
+  if (state._botSimulation) return;
   try {
     const copy = clone(state);
     copy.undo = null;
@@ -886,15 +887,21 @@ function awardFeature(state, feature, complete, endGame) {
 function allFeatures(state) {
   const features = [];
   const seen = {};
+  const componentByNode = {};
   eachPlaced(state, function (x, y, tile) {
     const spec = rotatedType(tile.typeId, tile.rot);
     ["city", "road"].forEach(function (kind) {
       const groups = kind === "city" ? spec.cities : spec.roads;
       groups.forEach(function (_, index) {
-        const feature = collectFeature(state, x, y, kind, index);
-        const id = kind + ":" + feature.nodes.map(function (node) {
-          return node.x + "," + node.y + ":" + node.index;
-        }).sort().join("|");
+        const nodeKey = kind + ":" + keyXY(x, y) + ":" + index;
+        let feature = componentByNode[nodeKey];
+        if (!feature) {
+          feature = collectFeature(state, x, y, kind, index);
+          feature.nodes.forEach(function (node) {
+            componentByNode[kind + ":" + keyXY(node.x, node.y) + ":" + node.index] = feature;
+          });
+        }
+        const id = featureKey(feature);
         if (!seen[id]) {
           seen[id] = true;
           features.push(feature);
@@ -932,6 +939,7 @@ function allFieldFeatures(state) {
 
 function scoreFarms(state) {
   const logs = [];
+  const fieldByNode = {};
   allFeatures(state).filter(function (feature) {
     return feature.kind === "city" && featureComplete(state, feature);
   }).forEach(function (city) {
@@ -940,7 +948,15 @@ function scoreFarms(state) {
       const spec = rotatedType(node.tile.typeId, node.tile.rot);
       spec.fields.forEach(function (field, index) {
         if (field.cityAreas.indexOf(node.index) === -1) return;
-        const connectedField = collectFeature(state, node.x, node.y, "field", index);
+        const nodeKey = keyXY(node.x, node.y) + ":" + index;
+        let connectedField = fieldByNode[nodeKey];
+        if (!connectedField) {
+          connectedField = collectFeature(state, node.x, node.y, "field", index);
+          connectedField.nodes.forEach(function (fieldNode) {
+            fieldByNode[keyXY(fieldNode.x, fieldNode.y) + ":" + fieldNode.index] =
+              connectedField;
+          });
+        }
         fields[featureKey(connectedField)] = connectedField;
       });
     });
@@ -1098,9 +1114,11 @@ function confirmTurn(state, preserveUndo) {
   if (!preserveUndo) state.undo = null;
   state.meeplePicked = false;
   const logs = monasteryLogs.concat(scoreCompletedFeatures(state));
-  const edgeMismatches = validateBoard(state);
-  if (edgeMismatches.length) {
-    console.warn("Board has mismatched neighbouring tile edges:", edgeMismatches);
+  if (!state._botSimulation) {
+    const edgeMismatches = validateBoard(state);
+    if (edgeMismatches.length) {
+      console.warn("Board has mismatched neighbouring tile edges:", edgeMismatches);
+    }
   }
   if (state.deck.length === 0) {
     const endLogs = scoreUnfinishedFeatures(state, true).concat(scoreFarms(state));

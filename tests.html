@@ -35,10 +35,10 @@
     function test(name, fn) {
       const item = document.createElement("li");
       try {
-        fn();
+        const detail = fn();
         passed += 1;
         item.className = "pass";
-        item.textContent = "PASS — " + name;
+        item.textContent = "PASS — " + name + (detail ? ": " + detail : "");
       } catch (error) {
         failed += 1;
         item.className = "fail";
@@ -2196,11 +2196,11 @@
         assertEqual(!!move, true, "computer finds a legal placement");
         for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
         assertEqual(selectPending(state, move.x, move.y), true, "computer selects legal square");
-        if (move.meepleSpot) {
+        if (move.action) {
           assertEqual(selectPendingMeeple(
             state,
-            move.meepleSpot.kind,
-            move.meepleSpot.index
+            move.action.spot.kind,
+            move.action.spot.index
           ), true, "computer selects legal meeple spot");
         }
         assertEqual(confirmPending(state, false), true, "computer confirms through normal turn flow");
@@ -2220,6 +2220,143 @@
       });
       return state;
     }
+
+    function applyBotMove(state, move) {
+      for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
+      if (!selectPending(state, move.x, move.y)) throw new Error("bot placement was rejected");
+      if (move.action && !selectPendingMeeple(
+        state,
+        move.action.spot.kind,
+        move.action.spot.index
+      )) throw new Error("bot action was rejected");
+      if (!confirmPending(state, false)) throw new Error("bot confirmation was rejected");
+    }
+
+    function cityChoiceState(ownedByBot) {
+      const state = testState();
+      const owner = ownedByBot ? 0 : 1;
+      state.players[owner].meeples = 6;
+      if (!ownedByBot) state.players[0].meeples = 0;
+      put(state, 0, 0, "C", 0, meeple(owner, "city", 0));
+      put(state, 0, -1, "E", 2);
+      put(state, 1, 0, "E", 3);
+      put(state, 0, 1, "E", 0);
+      state.current = 0;
+      state.phase = "place";
+      state.currentTile = { uid: "closing-city", typeId: "E", rot: 0 };
+      state.deck = [{ uid: "future-tile", typeId: "B" }];
+      return state;
+    }
+
+    test("smart bot finishes its own city when the held tile can close it", function () {
+      const state = cityChoiceState(true);
+      setBotRandom(createSeededRandom("smart-own-city"));
+      const move = chooseMove(state, 0);
+      assertEqual(move.x, -1, "move closes the missing side");
+      assertEqual(move.y, 0, "move closes the missing side");
+      assertEqual(move.rotation, 1, "city edge faces the opening");
+      const simulated = simulatedTurn(state, 0, move);
+      assertEqual(simulated.players[0].score, 12, "completed city scores through game rules");
+      assertEqual(simulated.board["0,0"].meeple, null, "completed city returns the meeple");
+    });
+
+    test("smart bot avoids completing an opponent city when a neutral move exists", function () {
+      const state = cityChoiceState(false);
+      setBotRandom(createSeededRandom("smart-avoid-opponent"));
+      const move = chooseMove(state, 0);
+      assertEqual(move.x === -1 && move.y === 0, false, "do not close opponent city");
+      assertEqual(move.action, null, "bot has no meeples for an unrelated claim");
+      const simulated = simulatedTurn(state, 0, move);
+      assertEqual(simulated.players[0].score, 0, "neutral move scores no points for bot");
+      assertEqual(simulated.players[1].score, 0, "neutral move scores no points for opponent");
+    });
+
+    test("random bot mode remains available and uses the action move shape", function () {
+      const random = createSeededRandom("random-mode");
+      setBotRandom(random);
+      const state = newGame([
+        { name: "Random", color: "#c62828", computer: true },
+        { name: "Other", color: "#1565c0", computer: true }
+      ], 10, false, random);
+      beginTurn(state);
+      const move = chooseMove(state, state.current, "random");
+      assertEqual(!!move, true, "random chooser finds a move");
+      assertEqual(typeof move.rotation, "number", "random move includes rotation");
+      assertEqual(move.action === null || (
+        move.action.type === "meeple" &&
+        typeof move.action.spot.kind === "string" &&
+        typeof move.action.spot.index === "number"
+      ), true, "random move action uses the supported shape");
+      assertEqual(move.meepleSpot, undefined, "legacy meepleSpot field is removed");
+    });
+
+    test("40 seeded smart-versus-random games report wins, scores, farmers, and speed", function () {
+      let smartWins = 0;
+      let smartScoreTotal = 0;
+      let randomScoreTotal = 0;
+      let farmerPlacements = 0;
+      let smartMoveCount = 0;
+      let smartMoveTime = 0;
+      let slowestSmartMove = 0;
+
+      for (let gameIndex = 0; gameIndex < 40; gameIndex++) {
+        const random = createSeededRandom(gameIndex + 1);
+        setBotRandom(random);
+        const smartSeat = gameIndex % 2;
+        const riverEnabled = gameIndex >= 20;
+        const players = [
+          { name: "Seat 1", color: "#c62828", computer: true },
+          { name: "Seat 2", color: "#1565c0", computer: true }
+        ];
+        const state = newGame(players, undefined, riverEnabled, random);
+        const totalTiles = state.deck.length + state.riverDeck.length;
+        const seatMode = smartSeat === 0
+          ? ["smart", "random"]
+          : ["random", "smart"];
+        let turns = 0;
+
+        while (!state.gameOver && turns < totalTiles + 1) {
+          beginTurn(state);
+          if (state.gameOver) break;
+          const current = state.current;
+          const started = performance.now();
+          const move = chooseMove(state, current, seatMode[current]);
+          const elapsed = performance.now() - started;
+          if (seatMode[current] === "smart") {
+            smartMoveCount++;
+            smartMoveTime += elapsed;
+            slowestSmartMove = Math.max(slowestSmartMove, elapsed);
+            if (turns < totalTiles / 2 && move.action &&
+                move.action.type === "meeple" && move.action.spot.kind === "field") {
+              farmerPlacements++;
+            }
+          }
+          assertEqual(!!move, true, "both choosers find a legal move");
+          applyBotMove(state, move);
+          turns++;
+        }
+
+        assertEqual(state.gameOver, true, "match ends normally");
+        const smartScore = state.players[smartSeat].score;
+        const randomScore = state.players[1 - smartSeat].score;
+        if (smartScore > randomScore) smartWins++;
+        smartScoreTotal += smartScore;
+        randomScoreTotal += randomScore;
+      }
+
+      const averageSmartTime = smartMoveTime / smartMoveCount;
+      const report = smartWins + "/40 wins; average score smart " +
+        (smartScoreTotal / 40).toFixed(1) + ", random " +
+        (randomScoreTotal / 40).toFixed(1) + "; first-half farmers " +
+        farmerPlacements + "; smart move average " + averageSmartTime.toFixed(2) +
+        " ms, slowest " + slowestSmartMove.toFixed(2) + " ms (estimated 4×: " +
+        (slowestSmartMove * 4).toFixed(2) + " ms).";
+      if (smartWins < 34) throw new Error(report + " Expected at least 34 smart wins.");
+      if (slowestSmartMove * 4 > 700) {
+        throw new Error(report + " Estimated 4× move time exceeds 700 ms.");
+      }
+      return report;
+    });
 
     test("chooseMove never changes game state", function () {
       const random = createSeededRandom("immutability");
@@ -2246,14 +2383,15 @@
         const move = chooseMove(state, state.current);
         assertEqual(legalRotationsAt(state, state.currentTile.typeId, move.x, move.y)
           .indexOf(move.rotation) >= 0, true, "rotation is legal at selected square");
-        if (move.meepleSpot) {
+        if (move.action) {
           const pending = Object.assign({}, state, {
             phase: "place",
             pending: { x: move.x, y: move.y },
             currentTile: Object.assign({}, state.currentTile, { rot: move.rotation })
           });
           assertEqual(pendingMeepleOptions(pending).some(function (spot) {
-            return spot.kind === move.meepleSpot.kind && spot.index === move.meepleSpot.index;
+            return spot.kind === move.action.spot.kind &&
+              spot.index === move.action.spot.index;
           }), true, "meeple spot is legal");
         }
         state.currentTile.typeId = makeDeck().deck[i].typeId;
@@ -2483,11 +2621,11 @@
         assertEqual(!!move, true, "computer selects a move after Resume");
         for (let i = 0; i < move.rotation; i++) rotateCurrent(resumed, 1);
         assertEqual(selectPending(resumed, move.x, move.y), true, "computer places via turn API");
-        if (move.meepleSpot) {
+        if (move.action) {
           assertEqual(selectPendingMeeple(
             resumed,
-            move.meepleSpot.kind,
-            move.meepleSpot.index
+            move.action.spot.kind,
+            move.action.spot.index
           ), true, "computer selects a legal meeple spot");
         }
         assertEqual(confirmPending(resumed, false), true, "computer completes a normal turn");
@@ -2566,11 +2704,11 @@
         assertEqual(!!move, true, "current player finds a legal move");
         for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
         assertEqual(selectPending(state, move.x, move.y), true, "current player selects a legal tile");
-        if (move.meepleSpot) {
+        if (move.action) {
           assertEqual(selectPendingMeeple(
             state,
-            move.meepleSpot.kind,
-            move.meepleSpot.index
+            move.action.spot.kind,
+            move.action.spot.index
           ), true, "current player selects a legal spot");
         }
         assertEqual(confirmPending(state, false), true, "turn completes normally");
@@ -2613,11 +2751,11 @@
         const move = chooseMove(state, state.current);
         for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
         assertEqual(selectPending(state, move.x, move.y), true, "autoplay placement");
-        if (move.meepleSpot) {
+        if (move.action) {
           assertEqual(selectPendingMeeple(
             state,
-            move.meepleSpot.kind,
-            move.meepleSpot.index
+            move.action.spot.kind,
+            move.action.spot.index
           ), true, "autoplay meeple");
         }
         assertEqual(confirmPending(state, false), true, "autoplay turn");

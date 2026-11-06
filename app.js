@@ -141,6 +141,8 @@ const shortGameTileLimit = query.get("tiles") === "10"
 const debugFields = query.get("debug") === "fields";
 const autoplay = query.get("autoplay") === "1";
 const gameSeed = query.get("seed");
+const botMode = query.get("bot");
+const botModes = (query.get("bots") || "").split(",");
 let gameRandom = Math.random;
 const cam = { x: 0, y: 0, scale: 1, tile: 96 };
 const pointers = new Map();
@@ -161,6 +163,15 @@ if (gameSeed !== null) {
 function isComputerPlayer(index) {
   return !!(state && state.players[index] &&
     (autoplay || state.players[index].computer));
+}
+
+function chooserForPlayer(index) {
+  if (botMode === "random" || botMode === "smart") return botMode;
+  let seat = 0;
+  for (let i = 0; i < index; i++) {
+    if (isComputerPlayer(i)) seat++;
+  }
+  return botModes[seat] === "random" ? "random" : "smart";
 }
 
 function resetGameRandom() {
@@ -416,7 +427,8 @@ function startComputerTurn(resumeExisting) {
   goPlay();
   const playerIndex = state.current;
   const player = state.players[playerIndex];
-  const move = chooseMove(state, playerIndex);
+  const thinkingStarted = performance.now();
+  const move = chooseMove(state, playerIndex, chooserForPlayer(playerIndex));
   if (!move) {
     computerActive = false;
     console.error("Computer could not find a legal move for a placeable tile.");
@@ -426,10 +438,10 @@ function startComputerTurn(resumeExisting) {
   const rotationSteps = (move.rotation - state.currentTile.rot + 4) % 4;
   for (let i = 0; i < rotationSteps; i++) rotateCurrent(state, 1);
   if (!selectPending(state, move.x, move.y) ||
-      (move.meepleSpot && !selectPendingMeeple(
+      (move.action && !selectPendingMeeple(
         state,
-        move.meepleSpot.kind,
-        move.meepleSpot.index
+        move.action.spot.kind,
+        move.action.spot.index
       ))) {
     computerActive = false;
     console.error("Computer move was rejected by the normal turn functions:", move);
@@ -441,7 +453,10 @@ function startComputerTurn(resumeExisting) {
   if (autoplay) {
     finishComputerTurn();
   } else {
-    computerTimer = window.setTimeout(finishComputerTurn, 1000);
+    computerTimer = window.setTimeout(
+      finishComputerTurn,
+      Math.max(0, 1000 - (performance.now() - thinkingStarted))
+    );
   }
 }
 
