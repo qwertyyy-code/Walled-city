@@ -70,7 +70,7 @@ if ("serviceWorker" in navigator) {
   ui.updateNotice.addEventListener("click", function () {
     if (!waitingWorker) return;
     cancelComputerTurn();
-    if (state) saveForHome(state);
+    if (state && !watch) saveForHome(state);
     reloadAfterUpdate = true;
     waitingWorker.postMessage({ type: "SKIP_WAITING" });
   });
@@ -140,6 +140,14 @@ const shortGameTileLimit = query.get("tiles") === "10"
   : undefined;
 const debugFields = query.get("debug") === "fields";
 const autoplay = query.get("autoplay") === "1";
+const watch = query.get("watch") === "1";
+const requestedWatchPlayers = Number(query.get("players"));
+const watchPlayerCount = Number.isInteger(requestedWatchPlayers) &&
+  requestedWatchPlayers >= 2 && requestedWatchPlayers <= PLAYER_COLORS.length
+  ? requestedWatchPlayers
+  : 2;
+const riverQuery = query.get("river");
+if (riverQuery === "1" || riverQuery === "0") ui.river.checked = riverQuery === "1";
 const gameSeed = query.get("seed");
 const botMode = query.get("bot");
 const botModes = (query.get("bots") || "").split(",");
@@ -162,7 +170,7 @@ if (gameSeed !== null) {
 
 function isComputerPlayer(index) {
   return !!(state && state.players[index] &&
-    (autoplay || state.players[index].computer));
+    (autoplay || watch || state.players[index].computer));
 }
 
 function chooserForPlayer(index) {
@@ -252,6 +260,7 @@ document.getElementById("p-plus").onclick = function () {
 };
 
 function makePlayerSetup() {
+  if (watch) return buildPlayerSetup(false, watchPlayerCount, 1, [], true);
   return buildPlayerSetup(
     computerMode,
     playerCount,
@@ -268,7 +277,8 @@ function startConfiguredGame(replaceSavedGame) {
     shortGameTileLimit,
     ui.river.checked,
     gameRandom,
-    replaceSavedGame
+    replaceSavedGame,
+    watch
   );
   if (!state) return;
   pushGameHistory();
@@ -278,7 +288,7 @@ function startConfiguredGame(replaceSavedGame) {
 }
 
 ui.newGame.onclick = function () {
-  if (!autoplay && loadSave()) {
+  if (!autoplay && !watch && loadSave()) {
     ui.newGameDialog.showModal();
     return;
   }
@@ -338,7 +348,7 @@ function cancelComputerTurn() {
 
 function showHome(fromBackNavigation) {
   cancelComputerTurn();
-  if (state) saveForHome(state);
+  if (state && !watch) saveForHome(state);
   show(ui.start);
   renderSetup();
   if (!fromBackNavigation && history.state && history.state[GAME_HISTORY_KEY]) {
@@ -450,7 +460,7 @@ function startComputerTurn(resumeExisting) {
   }
   refreshPlay();
   ui.turn.textContent = player.name + " is playing...";
-  if (autoplay) {
+  if (autoplay && !watch) {
     finishComputerTurn();
   } else {
     computerTimer = window.setTimeout(
@@ -914,4 +924,4 @@ window.addEventListener("resize", function () {
 });
 
 renderSetup();
-if (autoplay) document.getElementById("btn-new").click();
+if (autoplay || watch) document.getElementById("btn-new").click();

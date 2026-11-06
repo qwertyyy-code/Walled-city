@@ -20,6 +20,35 @@ const MEEPLE_ACTION_SHORTLIST_SIZE = 8;
 
 let botRandom = Math.random;
 
+function effectiveBotSettings(settings) {
+  const overrides = settings || {};
+  const farmerWeightOverride = overrides.FARMER_WEIGHT || {};
+  return {
+    COMPLETION_CHANCE: Object.assign({}, COMPLETION_CHANCE, overrides.COMPLETION_CHANCE),
+    MONASTERY_COMPLETION_CHANCE: Object.assign(
+      {},
+      MONASTERY_COMPLETION_CHANCE,
+      overrides.MONASTERY_COMPLETION_CHANCE
+    ),
+    COMPLETION_TILE_WINDOW: overrides.COMPLETION_TILE_WINDOW === undefined
+      ? COMPLETION_TILE_WINDOW
+      : overrides.COMPLETION_TILE_WINDOW,
+    FARMER_WEIGHT_START: overrides.FARMER_WEIGHT_START === undefined
+      ? (farmerWeightOverride.early === undefined ? FARMER_WEIGHT.early : farmerWeightOverride.early)
+      : overrides.FARMER_WEIGHT_START,
+    FARMER_WEIGHT_END: overrides.FARMER_WEIGHT_END === undefined
+      ? (farmerWeightOverride.late === undefined ? FARMER_WEIGHT.late : farmerWeightOverride.late)
+      : overrides.FARMER_WEIGHT_END,
+    FARMER_WEIGHT_TRANSITION_PROGRESS: overrides.FARMER_WEIGHT_TRANSITION_PROGRESS === undefined
+      ? FARMER_WEIGHT_TRANSITION_PROGRESS
+      : overrides.FARMER_WEIGHT_TRANSITION_PROGRESS,
+    MEEPLE_VALUE: overrides.MEEPLE_VALUE === undefined ? MEEPLE_VALUE : overrides.MEEPLE_VALUE,
+    MEEPLE_ACTION_SHORTLIST_SIZE: overrides.MEEPLE_ACTION_SHORTLIST_SIZE === undefined
+      ? MEEPLE_ACTION_SHORTLIST_SIZE
+      : overrides.MEEPLE_ACTION_SHORTLIST_SIZE
+  };
+}
+
 function createSeededRandom(seed) {
   let value = 0;
   const text = String(seed);
@@ -139,24 +168,24 @@ function monasteryEmptyNeighbors(game, feature) {
   return empty;
 }
 
-function completionChance(game, feature, tilesLeft) {
-  const tileFactor = Math.min(1, tilesLeft / COMPLETION_TILE_WINDOW);
+function completionChance(game, feature, tilesLeft, settings) {
+  const tileFactor = Math.min(1, tilesLeft / settings.COMPLETION_TILE_WINDOW);
   if (feature.kind === "monastery") {
     const empty = monasteryEmptyNeighbors(game, feature);
     const chance = Math.max(
-      MONASTERY_COMPLETION_CHANCE.floor,
-      MONASTERY_COMPLETION_CHANCE.oneEmptyNeighbor -
-        (empty - 1) * MONASTERY_COMPLETION_CHANCE.perAdditionalEmptyNeighbor
+      settings.MONASTERY_COMPLETION_CHANCE.floor,
+      settings.MONASTERY_COMPLETION_CHANCE.oneEmptyNeighbor -
+        (empty - 1) * settings.MONASTERY_COMPLETION_CHANCE.perAdditionalEmptyNeighbor
     );
     return chance * tileFactor;
   }
 
   const open = openFeatureSides(game, feature);
   const chance = open === 1
-    ? COMPLETION_CHANCE.oneOpenSide
+    ? settings.COMPLETION_CHANCE.oneOpenSide
     : open === 2
-      ? COMPLETION_CHANCE.twoOpenSides
-      : COMPLETION_CHANCE.threeOrMoreOpenSides;
+      ? settings.COMPLETION_CHANCE.twoOpenSides
+      : settings.COMPLETION_CHANCE.threeOrMoreOpenSides;
   return chance * tileFactor;
 }
 
@@ -168,15 +197,15 @@ function countTilesAtStart(game) {
     placed + (game.currentTile ? 1 : 0);
 }
 
-function farmerWeight(tilesLeft, tilesAtStart) {
+function farmerWeight(tilesLeft, tilesAtStart, settings) {
   const progress = tilesAtStart > 0
     ? Math.max(0, Math.min(1, 1 - tilesLeft / tilesAtStart))
     : 1;
-  if (progress <= FARMER_WEIGHT_TRANSITION_PROGRESS) return FARMER_WEIGHT.early;
-  const lateProgress = (progress - FARMER_WEIGHT_TRANSITION_PROGRESS) /
-    (1 - FARMER_WEIGHT_TRANSITION_PROGRESS);
-  return FARMER_WEIGHT.early +
-    (FARMER_WEIGHT.late - FARMER_WEIGHT.early) * lateProgress;
+  if (progress <= settings.FARMER_WEIGHT_TRANSITION_PROGRESS) return settings.FARMER_WEIGHT_START;
+  const lateProgress = (progress - settings.FARMER_WEIGHT_TRANSITION_PROGRESS) /
+    (1 - settings.FARMER_WEIGHT_TRANSITION_PROGRESS);
+  return settings.FARMER_WEIGHT_START +
+    (settings.FARMER_WEIGHT_END - settings.FARMER_WEIGHT_START) * lateProgress;
 }
 
 function simulatedTurn(game, playerIndex, move) {
@@ -208,10 +237,10 @@ function simulatedTurn(game, playerIndex, move) {
   return copy;
 }
 
-function playerValues(game, tilesLeft, tilesAtStart) {
+function playerValues(game, tilesLeft, tilesAtStart, settings) {
   const originalScores = game.players.map(function (player) { return player.score; });
   if (!game.finalScored) scoreFarms(game);
-  const weight = farmerWeight(tilesLeft, tilesAtStart);
+  const weight = farmerWeight(tilesLeft, tilesAtStart, settings);
   const features = allFeatures(game).filter(function (feature) {
     return !featureComplete(game, feature);
   }).map(function (feature) {
@@ -220,7 +249,7 @@ function playerValues(game, tilesLeft, tilesAtStart) {
     if (!highest) return null;
     const endValue = featurePoints(game, feature, false);
     const finishedValue = featurePoints(game, feature, true);
-    const chance = completionChance(game, feature, tilesLeft);
+    const chance = completionChance(game, feature, tilesLeft, settings);
     return {
       counts: counts,
       highest: highest,
@@ -238,34 +267,35 @@ function playerValues(game, tilesLeft, tilesAtStart) {
       }
     });
 
-    value += MEEPLE_VALUE * player.meeples *
+    value += settings.MEEPLE_VALUE * player.meeples *
       (tilesAtStart > 0 ? tilesLeft / tilesAtStart : 0);
     return value;
   });
 }
 
-function scoreMove(game, playerIndex, move, tilesAtStart) {
+function scoreMove(game, playerIndex, move, tilesAtStart, settings) {
   const simulated = simulatedTurn(game, playerIndex, move);
   const tilesLeft = simulated.deck.length + simulated.riverDeck.length;
-  const values = playerValues(simulated, tilesLeft, tilesAtStart);
+  const values = playerValues(simulated, tilesLeft, tilesAtStart, settings);
   const opponents = values.filter(function (_, index) { return index !== playerIndex; });
   return values[playerIndex] - Math.max.apply(null, opponents.concat([0]));
 }
 
-function chooseSmartMove(game, playerIndex) {
+function chooseSmartMove(game, playerIndex, overrides) {
   const candidates = generateMoveCandidates(game, playerIndex, null, false);
   if (!candidates.length) return null;
 
+  const settings = effectiveBotSettings(overrides);
   const tilesAtStart = countTilesAtStart(game);
   const scoredMoves = candidates.map(function (candidate) {
     return {
       move: candidate,
-      score: scoreMove(game, playerIndex, candidate, tilesAtStart)
+      score: scoreMove(game, playerIndex, candidate, tilesAtStart, settings)
     };
   });
   const bestPlacements = scoredMoves.slice().sort(function (a, b) {
     return b.score - a.score;
-  }).slice(0, MEEPLE_ACTION_SHORTLIST_SIZE).map(function (item) {
+  }).slice(0, settings.MEEPLE_ACTION_SHORTLIST_SIZE).map(function (item) {
     return item.move;
   });
   const meepleCandidates = generateMoveCandidates(
@@ -277,7 +307,7 @@ function chooseSmartMove(game, playerIndex) {
   meepleCandidates.forEach(function (candidate) {
     scoredMoves.push({
       move: candidate,
-      score: scoreMove(game, playerIndex, candidate, tilesAtStart)
+      score: scoreMove(game, playerIndex, candidate, tilesAtStart, settings)
     });
   });
 
@@ -296,8 +326,8 @@ function chooseSmartMove(game, playerIndex) {
   return bestMoves[Math.floor(botRandom() * bestMoves.length)];
 }
 
-function chooseMove(game, playerIndex, chooser) {
+function chooseMove(game, playerIndex, chooser, settings) {
   return chooser === "random"
     ? chooseRandomMove(game, playerIndex)
-    : chooseSmartMove(game, playerIndex);
+    : chooseSmartMove(game, playerIndex, settings);
 }

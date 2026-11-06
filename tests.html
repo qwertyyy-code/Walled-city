@@ -14,7 +14,7 @@
 </head>
 <body>
   <h1>Game checks</h1>
-  <p>These checks cover tile placement, River rules, computer moves and autoplay, Home and Resume, saved-game replacement, feature completion, majority ties, meeple return, Undo, and end-game scoring.</p>
+  <p>These checks cover tile placement, River rules, computer moves and autoplay, watched-game saves, Home and Resume, saved-game replacement, feature completion, majority ties, meeple return, Undo, end-game scoring, and seeded bot matches.</p>
   <ol id="results"></ol>
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
@@ -49,17 +49,18 @@
 
     async function testAsync(name, fn) {
       const item = document.createElement("li");
+      item.textContent = "RUNNING — " + name;
+      results.appendChild(item);
       try {
-        await fn();
+        const detail = await fn();
         passed += 1;
         item.className = "pass";
-        item.textContent = "PASS — " + name;
+        item.textContent = "PASS — " + name + (detail ? ": " + detail : "");
       } catch (error) {
         failed += 1;
         item.className = "fail";
         item.textContent = "FAIL — " + name + ": " + error.message;
       }
-      results.appendChild(item);
       document.getElementById("summary").textContent =
         passed + " passed, " + failed + " failed.";
     }
@@ -2940,6 +2941,214 @@
       assertEqual(state.gameOver, true, "four-player autoplay ends");
       assertEqual(validateBoard(state).length, 0, "autoplay board validates");
     });
+
+    function runWorkerGames(jobs) {
+      if (!jobs.length) return Promise.resolve([]);
+      const workerCount = Math.min(
+        jobs.length,
+        Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4))
+      );
+      return new Promise(function (resolve, reject) {
+        const workers = [];
+        const results = new Array(jobs.length);
+        let nextJob = 0;
+        let completed = 0;
+        let settled = false;
+
+        function stopWorkers() {
+          workers.forEach(function (worker) { worker.terminate(); });
+        }
+
+        function fail(error) {
+          if (settled) return;
+          settled = true;
+          stopWorkers();
+          reject(error);
+        }
+
+        function assign(worker) {
+          if (nextJob >= jobs.length) {
+            worker.terminate();
+            return;
+          }
+          const index = nextJob++;
+          worker.postMessage(Object.assign({ index: index }, jobs[index]));
+        }
+
+        for (let i = 0; i < workerCount; i++) {
+          const worker = new Worker("./match-worker.js?v=36");
+          workers.push(worker);
+          worker.onmessage = function (event) {
+            if (event.data.error) {
+              fail(new Error("seed " + jobs[event.data.index].seed + ": " + event.data.error));
+              return;
+            }
+            results[event.data.index] = event.data.result;
+            completed += 1;
+            if (completed === jobs.length) {
+              settled = true;
+              stopWorkers();
+              resolve(results);
+              return;
+            }
+            assign(worker);
+          };
+          worker.onerror = function (event) {
+            fail(new Error("Match worker failed: " + event.message));
+          };
+          assign(worker);
+        }
+      });
+    }
+
+    async function runMatch(settingsA, settingsB, games, options) {
+      if (!Number.isInteger(games) || games < 1) throw new Error("games must be a positive integer");
+      const seeds = options && options.seeds ? options.seeds.slice() : null;
+      if (seeds && seeds.length !== games) throw new Error("seed list length must equal games");
+      const jobs = Array.from({ length: games }, function (_, index) {
+        const aSeat = index % 2 === 0 ? 0 : 1;
+        return {
+          seed: seeds ? seeds[index] : index + 1,
+          riverEnabled: index % 2 === 0,
+          settingsByPlayer: aSeat === 0
+            ? [settingsA, settingsB]
+            : [settingsB, settingsA]
+        };
+      });
+      const gameResults = await runWorkerGames(jobs);
+      const totals = {
+        winsA: 0,
+        winsB: 0,
+        draws: 0,
+        scoreA: 0,
+        scoreB: 0,
+        winningMargin: 0,
+        decisiveGames: 0,
+        firstPlayerWins: 0,
+        completedCities: 0,
+        meeplesInSupply: 0,
+        farmers: 0,
+        noMeepleTurns: 0,
+        turns: 0
+      };
+      gameResults.forEach(function (result, index) {
+        const aSeat = index % 2 === 0 ? 0 : 1;
+        const bSeat = 1 - aSeat;
+        const scoreA = result.scores[aSeat];
+        const scoreB = result.scores[bSeat];
+        totals.scoreA += scoreA;
+        totals.scoreB += scoreB;
+        if (scoreA === scoreB) {
+          totals.draws += 1;
+        } else {
+          totals.decisiveGames += 1;
+          totals.winningMargin += Math.abs(scoreA - scoreB);
+          if (scoreA > scoreB) totals.winsA += 1;
+          else totals.winsB += 1;
+          if ((scoreA > scoreB && aSeat === 0) || (scoreB > scoreA && bSeat === 0)) {
+            totals.firstPlayerWins += 1;
+          }
+        }
+        totals.completedCities += result.completedCities;
+        totals.meeplesInSupply += result.meeplesInSupply.reduce(function (sum, count) {
+          return sum + count;
+        }, 0) / result.meeplesInSupply.length;
+        totals.farmers += result.farmers.reduce(function (sum, count) {
+          return sum + count;
+        }, 0) / result.farmers.length;
+        totals.noMeepleTurns += result.noMeepleTurns;
+        totals.turns += result.turns;
+      });
+      return {
+        games: games,
+        winsA: totals.winsA,
+        winsB: totals.winsB,
+        draws: totals.draws,
+        averageScoreA: totals.scoreA / games,
+        averageScoreB: totals.scoreB / games,
+        averageWinningMargin: totals.decisiveGames
+          ? totals.winningMargin / totals.decisiveGames
+          : 0,
+        firstPlayerWins: totals.firstPlayerWins,
+        averageCitiesFinishedPerGame: totals.completedCities / games,
+        averageMeeplesLeftInSupplyPerBot: totals.meeplesInSupply / games,
+        averageFarmersPlacedPerBot: totals.farmers / games,
+        shareTurnsWithoutMeeple: totals.turns ? totals.noMeepleTurns / totals.turns : 0
+      };
+    }
+
+    async function runSmartSeatGames(playerCount, games) {
+      const scoresBySeat = PLAYER_COLORS.slice(0, playerCount).map(function () { return 0; });
+      const results = await runWorkerGames(Array.from({ length: games }, function (_, index) {
+        return {
+          seed: index + 1,
+          riverEnabled: index % 2 === 0,
+          settingsByPlayer: PLAYER_COLORS.slice(0, playerCount).map(function () { return {}; })
+        };
+      }));
+      results.forEach(function (result) {
+        result.scores.forEach(function (score, seat) {
+          scoresBySeat[seat] += score;
+        });
+      });
+      return scoresBySeat.map(function (score) { return score / games; });
+    }
+
+    test("watched games do not overwrite the saved game", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const original = newGame([
+          { name: "Saved", color: PLAYER_COLORS[0].hex },
+          { name: "Player 2", color: PLAYER_COLORS[1].hex }
+        ], 10, false, createSeededRandom("saved-before-watch"));
+        const originalSave = localStorage.getItem(SAVE_KEY);
+        const watched = createNewGameIfConfirmed([
+          { name: "Computer 1", color: PLAYER_COLORS[0].hex, computer: true },
+          { name: "Computer 2", color: PLAYER_COLORS[1].hex, computer: true }
+        ], 10, false, createSeededRandom("watch"), false, true);
+        saveForHome(watched);
+        assertEqual(watched.gameOver, false, "watch starts alongside a saved game");
+        assertEqual(localStorage.getItem(SAVE_KEY), originalSave, "watch and Home preserve the save");
+        assertEqual(loadSave().players[0].name, original.players[0].name, "saved game is still resumable");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("bot setting overrides are scoped and preserve default weights", function () {
+      const settingsA = effectiveBotSettings({ FARMER_WEIGHT_START: 0.5 });
+      const settingsB = effectiveBotSettings({});
+      assertEqual(settingsA.FARMER_WEIGHT_START, 0.5, "A receives its farmer weight override");
+      assertEqual(settingsB.FARMER_WEIGHT_START, 0.3, "B retains the default farmer weight");
+      assertEqual(effectiveBotSettings({}).FARMER_WEIGHT_START, 0.3,
+        "the bot default remains unchanged");
+    });
+
+    async function runComparisonChecks() {
+      await testAsync("runMatch({}, {}, 40) ends cleanly and reports all comparison and play statistics", async function () {
+        const result = await runMatch({}, {}, 40);
+        return JSON.stringify(result);
+      });
+
+      await testAsync("10 three-seat and 10 four-seat smart games finish cleanly", async function () {
+        const threeSeatScores = await runSmartSeatGames(3, 10);
+        const fourSeatScores = await runSmartSeatGames(4, 10);
+        return JSON.stringify({
+          averageScoresBySeat: { three: threeSeatScores, four: fourSeatScores }
+        });
+      });
+
+      await testAsync("runMatch repeats exactly with the same seed list", async function () {
+        const seeds = [101, 202, 303, 404];
+        const first = await runMatch({}, {}, seeds.length, { seeds: seeds });
+        const second = await runMatch({}, {}, seeds.length, { seeds: seeds });
+        assertEqual(JSON.stringify(first), JSON.stringify(second), "match results are deterministic");
+        return JSON.stringify(first);
+      });
+    }
+
+    window.setTimeout(runComparisonChecks, 0);
 
     testAsync("start-screen version matches service-worker cache version", async function () {
       const response = await fetch("./sw.js", { cache: "no-store" });

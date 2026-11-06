@@ -80,10 +80,11 @@ function buildPlayerSetup(computerMode, humanCount, computerOpponentCount, names
   return players;
 }
 
-function newGame(playerSetup, tileLimit, riverEnabled, rng) {
+function newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave) {
   const withRiver = !!riverEnabled;
   const pack = makeDeck(tileLimit, withRiver, rng);
   const state = emptyState();
+  Object.defineProperty(state, "_noSave", { value: !!suppressSave });
   state.players = playerSetup.map(function (p) {
     return {
       name: p.name,
@@ -123,7 +124,7 @@ function newGame(playerSetup, tileLimit, riverEnabled, rng) {
 }
 
 function persist(state) {
-  if (state._botSimulation) return;
+  if (state._botSimulation || state._noSave) return;
   try {
     const copy = clone(state);
     copy.undo = null;
@@ -143,9 +144,9 @@ function saveForHome(state) {
   persist(state);
 }
 
-function createNewGameIfConfirmed(playerSetup, tileLimit, riverEnabled, rng, replaceSavedGame) {
-  if (loadSave() && !replaceSavedGame) return null;
-  return newGame(playerSetup, tileLimit, riverEnabled, rng);
+function createNewGameIfConfirmed(playerSetup, tileLimit, riverEnabled, rng, replaceSavedGame, suppressSave) {
+  if (loadSave() && !replaceSavedGame && !suppressSave) return null;
+  return newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave);
 }
 
 function loadSave() {
