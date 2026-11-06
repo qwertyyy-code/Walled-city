@@ -47,6 +47,23 @@
       results.appendChild(item);
     }
 
+    async function testAsync(name, fn) {
+      const item = document.createElement("li");
+      try {
+        await fn();
+        passed += 1;
+        item.className = "pass";
+        item.textContent = "PASS — " + name;
+      } catch (error) {
+        failed += 1;
+        item.className = "fail";
+        item.textContent = "FAIL — " + name + ": " + error.message;
+      }
+      results.appendChild(item);
+      document.getElementById("summary").textContent =
+        passed + " passed, " + failed + " failed.";
+    }
+
     function testState() {
       const state = emptyState();
       state.players = [
@@ -2653,6 +2670,40 @@
       assertEqual(Array.from(bar.children).some(function (entry) {
         return entry.classList.contains("current-player");
       }), false, "no player is highlighted on results");
+    });
+
+    testAsync("start-screen version matches service-worker cache version", async function () {
+      const response = await fetch("./sw.js", { cache: "no-store" });
+      assertEqual(response.status, 200, "service-worker script responds");
+      const workerSource = await response.text();
+      const cache = workerSource.match(/const CACHE = ["']walled-city-v([^"']+)["']/);
+      assertEqual(!!cache, true, "cache version is declared");
+      const pageResponse = await fetch("./index.html", { cache: "no-store" });
+      assertEqual(pageResponse.status, 200, "app page responds");
+      const pageSource = await pageResponse.text();
+      const appVersion = new DOMParser().parseFromString(pageSource, "text/html")
+        .getElementById("app-version");
+      assertEqual(!!appVersion, true, "visible app version is present");
+      assertEqual(appVersion.textContent.trim(),
+        "v" + cache[1], "visible app version matches worker cache");
+    });
+
+    testAsync("every service-worker cache file responds with HTTP 200", async function () {
+      const response = await fetch("./sw.js", { cache: "no-store" });
+      assertEqual(response.status, 200, "service-worker script responds");
+      const workerSource = await response.text();
+      const filesMatch = workerSource.match(/const FILES = \[([\s\S]*?)\];/);
+      assertEqual(!!filesMatch, true, "cache file list is declared");
+      const files = Array.from(filesMatch[1].matchAll(/["']([^"']+)["']/g))
+        .map(function (match) { return match[1]; });
+      assertEqual(files.length > 0, true, "cache file list is not empty");
+      const statuses = await Promise.all(files.map(async function (file) {
+        const fileResponse = await fetch(file, { cache: "no-store" });
+        return { file: file, status: fileResponse.status };
+      }));
+      const failures = statuses.filter(function (file) { return file.status !== 200; });
+      assertEqual(failures.length, 0,
+        "all cache files return 200: " + JSON.stringify(failures));
     });
 
     document.getElementById("summary").textContent =

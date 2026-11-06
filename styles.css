@@ -341,6 +341,12 @@ input[type="text"] {
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .dialog-actions .btn { min-height: 44px; padding: 8px 14px; }
 
+.app-version {
+  align-self: center;
+  color: #867d70;
+  font-size: 0.72rem;
+}
+
 .meeple-row {
   display: flex;
   gap: 8px;

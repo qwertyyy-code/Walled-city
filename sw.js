@@ -1,7 +1,7 @@
 /*
  * sw.js — Caches every app file so the game works offline after first load.
  */
-const CACHE = "walled-city-v31";
+const CACHE = "walled-city-v32";
 const FILES = [
   "./",
   "./index.html",
@@ -19,7 +19,9 @@ const FILES = [
 self.addEventListener("install", function (event) {
   event.waitUntil(
     caches.open(CACHE).then(function (cache) {
-      return cache.addAll(FILES);
+      return cache.addAll(FILES.map(function (file) {
+        return new Request(file, { cache: "reload" });
+      }));
     })
   );
 });

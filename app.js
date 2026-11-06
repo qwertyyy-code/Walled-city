@@ -50,6 +50,16 @@ const ui = {
 if ("serviceWorker" in navigator) {
   let waitingWorker = null;
   let reloadAfterUpdate = false;
+  let registrationForUpdates = null;
+  let lastUpdateCheck = 0;
+
+  function checkForServiceWorkerUpdate() {
+    if (!registrationForUpdates || !navigator.onLine) return Promise.resolve();
+    lastUpdateCheck = Date.now();
+    return registrationForUpdates.update().catch(function (error) {
+      console.error("Service worker update check failed:", error);
+    });
+  }
 
   function offerUpdate(worker) {
     if (!worker || !navigator.serviceWorker.controller) return;
@@ -59,6 +69,8 @@ if ("serviceWorker" in navigator) {
 
   ui.updateNotice.addEventListener("click", function () {
     if (!waitingWorker) return;
+    cancelComputerTurn();
+    if (state) saveForHome(state);
     reloadAfterUpdate = true;
     waitingWorker.postMessage({ type: "SKIP_WAITING" });
   });
@@ -68,6 +80,7 @@ if ("serviceWorker" in navigator) {
   });
 
   navigator.serviceWorker.register("./sw.js", { scope: "./" }).then(function (registration) {
+    registrationForUpdates = registration;
     offerUpdate(registration.waiting);
     registration.addEventListener("updatefound", function () {
       const installing = registration.installing;
@@ -76,11 +89,15 @@ if ("serviceWorker" in navigator) {
         if (installing.state === "installed") offerUpdate(installing);
       });
     });
-    return registration.update().catch(function (error) {
-      console.error("Service worker update check failed:", error);
-    });
+    return checkForServiceWorkerUpdate();
   }).catch(function (error) {
     console.error("Service worker registration failed:", error);
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible" || !navigator.onLine) return;
+    if (Date.now() - lastUpdateCheck < 60000) return;
+    checkForServiceWorkerUpdate();
   });
 }
 
