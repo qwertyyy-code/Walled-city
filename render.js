@@ -649,6 +649,55 @@ function drawBoard(ctx, state, cam, legal, hover, debugFields) {
         if (color) drawFieldDebug(ctx, x * ts, y * ts, ts - 2, field, color);
       });
     }
+  });
+
+  if (state.pending && state.currentTile) {
+    drawTileAt(
+      ctx,
+      state.currentTile.typeId,
+      state.currentTile.rot,
+      state.pending.x * ts,
+      state.pending.y * ts,
+      ts - 2,
+      false
+    );
+  }
+
+  if (Array.isArray(state.lastPlaced)) {
+    state.lastPlaced.forEach(function (last, playerIndex) {
+      if (!last || !state.players[playerIndex]) return;
+      const tile = boardTile(state, last.x, last.y);
+      if (!tile || tile.start) return;
+
+      const inset = 4 / cam.scale;
+      ctx.strokeStyle = state.players[playerIndex].color;
+      ctx.lineWidth = 3 / cam.scale;
+      roundRect(
+        ctx,
+        last.x * ts + inset,
+        last.y * ts + inset,
+        ts - 2 - inset * 2,
+        ts - 2 - inset * 2,
+        Math.max(2, 8 - inset)
+      );
+      ctx.stroke();
+
+      const innerInset = 6 / cam.scale;
+      ctx.strokeStyle = COL.ink;
+      ctx.lineWidth = 1 / cam.scale;
+      roundRect(
+        ctx,
+        last.x * ts + innerInset,
+        last.y * ts + innerInset,
+        ts - 2 - innerInset * 2,
+        ts - 2 - innerInset * 2,
+        Math.max(1, 8 - innerInset)
+      );
+      ctx.stroke();
+    });
+  }
+
+  eachPlaced(state, function (x, y, tile) {
     if (tile.meeple) {
       const spec = rotatedType(tile.typeId, tile.rot);
       let feat = { edges: [], slots: [] };
@@ -677,15 +726,6 @@ function drawBoard(ctx, state, cam, legal, hover, debugFields) {
   }
 
   if (state.pending && state.currentTile) {
-    drawTileAt(
-      ctx,
-      state.currentTile.typeId,
-      state.currentTile.rot,
-      state.pending.x * ts,
-      state.pending.y * ts,
-      ts - 2,
-      false
-    );
     ctx.save();
     ctx.setLineDash([8, 6]);
     ctx.strokeStyle = "#fff8d0";

@@ -2810,6 +2810,137 @@
       }), false, "no player is highlighted on results");
     });
 
+    function placeFirstLegalTile(state) {
+      beginTurn(state);
+      assertEqual(state.gameOver, false, "game has a playable tile");
+      const cell = legalCells(state, state.currentTile.typeId)[0];
+      assertEqual(!!cell, true, "tile has a legal placement");
+      assertEqual(selectPending(state, cell.x, cell.y), true, "placement is selected");
+      const placed = { x: cell.x, y: cell.y };
+      const player = state.current;
+      assertEqual(confirmPending(state), true, "turn is confirmed");
+      return { player: player, position: placed };
+    }
+
+    test("lastPlaced tracks each player's tile through one and two full rounds", function () {
+      const state = newGame([
+        { name: "One", color: "#c62828" },
+        { name: "Two", color: "#1565c0" },
+        { name: "Three", color: "#2e7d32" }
+      ], 15, false, createSeededRandom("last-placed-rounds"));
+      const firstRound = [];
+      for (let i = 0; i < state.players.length; i++) {
+        const placed = placeFirstLegalTile(state);
+        firstRound[placed.player] = placed.position;
+      }
+      assertEqual(state.lastPlaced.length, 3, "one entry exists per seat");
+      state.lastPlaced.forEach(function (position, player) {
+        assertEqual(JSON.stringify(position), JSON.stringify(firstRound[player]),
+          "round one entry belongs to player " + player);
+      });
+
+      const secondRound = [];
+      for (let i = 0; i < state.players.length; i++) {
+        const placed = placeFirstLegalTile(state);
+        secondRound[placed.player] = placed.position;
+      }
+      state.lastPlaced.forEach(function (position, player) {
+        assertEqual(JSON.stringify(position), JSON.stringify(secondRound[player]),
+          "round two entry belongs to player " + player);
+        assertEqual(
+          position.x === firstRound[player].x && position.y === firstRound[player].y,
+          false,
+          "old tile is no longer the player's last placement"
+        );
+      });
+    });
+
+    test("Undo restores lastPlaced exactly to its pre-turn value", function () {
+      const state = newGame([
+        { name: "One", color: "#c62828" },
+        { name: "Two", color: "#1565c0" }
+      ], 10, false, createSeededRandom("last-placed-undo"));
+      placeFirstLegalTile(state);
+      const before = JSON.stringify(state.lastPlaced);
+      placeFirstLegalTile(state);
+      assertEqual(undoLast(state), true, "completed placement can be undone");
+      assertEqual(JSON.stringify(state.lastPlaced), before, "lastPlaced returns to prior value");
+    });
+
+    test("Home and Resume preserve lastPlaced", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "One", color: "#c62828" },
+          { name: "Two", color: "#1565c0" },
+          { name: "Three", color: "#2e7d32" }
+        ], 10, false, createSeededRandom("last-placed-resume"));
+        placeFirstLegalTile(state);
+        placeFirstLegalTile(state);
+        const expected = JSON.stringify(state.lastPlaced);
+        saveForHome(state);
+        const resumed = loadSave();
+        assertEqual(JSON.stringify(resumed.lastPlaced), expected, "saved entries are restored");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("old saves initialize empty lastPlaced and populate it as turns are confirmed", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = newGame([
+          { name: "One", color: "#c62828" },
+          { name: "Two", color: "#1565c0" }
+        ], 10, false, createSeededRandom("last-placed-legacy"));
+        placeFirstLegalTile(state);
+        const oldSave = JSON.parse(localStorage.getItem(SAVE_KEY));
+        delete oldSave.lastPlaced;
+        localStorage.setItem(SAVE_KEY, JSON.stringify(oldSave));
+        const resumed = loadSave();
+        assertEqual(JSON.stringify(resumed.lastPlaced), JSON.stringify([null, null]),
+          "old save begins without outlines");
+        const first = placeFirstLegalTile(resumed);
+        assertEqual(JSON.stringify(resumed.lastPlaced[first.player]),
+          JSON.stringify(first.position), "first resumed player gets an entry");
+        const second = placeFirstLegalTile(resumed);
+        assertEqual(JSON.stringify(resumed.lastPlaced[second.player]),
+          JSON.stringify(second.position), "next player gets an entry");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
+    });
+
+    test("four-player seed 5 autoplay ends with no excess lastPlaced entries", function () {
+      const random = createSeededRandom(5);
+      setBotRandom(random);
+      const state = newGame(buildPlayerSetup(false, 4, 1, [], true), undefined, false, random);
+      let turns = 0;
+      while (!state.gameOver && turns < 100) {
+        beginTurn(state);
+        if (state.gameOver) break;
+        const move = chooseMove(state, state.current);
+        assertEqual(!!move, true, "bot finds a legal move");
+        for (let i = 0; i < move.rotation; i++) rotateCurrent(state, 1);
+        assertEqual(selectPending(state, move.x, move.y), true, "bot places a tile");
+        if (move.action) {
+          assertEqual(selectPendingMeeple(
+            state,
+            move.action.spot.kind,
+            move.action.spot.index
+          ), true, "bot action is accepted");
+        }
+        assertEqual(confirmPending(state, false), true, "bot turn confirms");
+        assertEqual(state.lastPlaced.length <= state.players.length, true,
+          "lastPlaced never exceeds player count");
+        turns++;
+      }
+      assertEqual(state.gameOver, true, "four-player autoplay ends");
+      assertEqual(validateBoard(state).length, 0, "autoplay board validates");
+    });
+
     testAsync("start-screen version matches service-worker cache version", async function () {
       const response = await fetch("./sw.js", { cache: "no-store" });
       assertEqual(response.status, 200, "service-worker script responds");

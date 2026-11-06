@@ -41,6 +41,7 @@ function emptyState() {
     riverLastTurn: null,
     discarded: [],
     board: {},
+    lastPlaced: [],
     currentTile: null,
     pending: null,
     selectedMeeple: null,
@@ -93,6 +94,7 @@ function newGame(playerSetup, tileLimit, riverEnabled, rng) {
       endGamePoints: emptyEndGamePoints()
     };
   });
+  state.lastPlaced = state.players.map(function () { return null; });
   state.deck = pack.deck;
   state.riverEnabled = withRiver;
   if (withRiver) {
@@ -152,6 +154,12 @@ function loadSave() {
     if (!raw) return null;
     const state = JSON.parse(raw);
     if (!state || state.version !== 1 || !state.board || !Array.isArray(state.players)) return null;
+    state.lastPlaced = state.players.map(function (_, index) {
+      const last = Array.isArray(state.lastPlaced) ? state.lastPlaced[index] : null;
+      if (!last || !Number.isInteger(last.x) || !Number.isInteger(last.y)) return null;
+      const tile = boardTile(state, last.x, last.y);
+      return tile && !tile.start ? { x: last.x, y: last.y } : null;
+    });
     state.pending = null;
     state.selectedMeeple = null;
     state.players.forEach(function (player) {
@@ -392,6 +400,7 @@ function anyLegalRotation(state, typeId) {
 function snapshot(state) {
   return clone({
     board: state.board,
+    lastPlaced: state.lastPlaced,
     players: state.players,
     current: state.current,
     currentTile: state.currentTile,
@@ -412,6 +421,9 @@ function snapshot(state) {
 function restoreSnap(state, snap) {
   state.board = snap.board;
   state.players = snap.players;
+  state.lastPlaced = state.players.map(function (_, index) {
+    return Array.isArray(snap.lastPlaced) ? snap.lastPlaced[index] || null : null;
+  });
   state.current = snap.current;
   state.currentTile = snap.currentTile;
   state.pending = snap.pending || null;
@@ -1108,6 +1120,11 @@ function confirmTurn(state, preserveUndo) {
   if (state.phase !== "meeple" || !state.placed || !state.meeplePicked) return false;
   const scores = state.players.map(function (player) { return player.score; });
   const monasteryLogs = scoreCompletedMonasteriesAround(state, state.placed.x, state.placed.y);
+  const previousLastPlaced = Array.isArray(state.lastPlaced) ? state.lastPlaced : [];
+  state.lastPlaced = state.players.map(function (_, index) {
+    return previousLastPlaced[index] || null;
+  });
+  state.lastPlaced[state.current] = { x: state.placed.x, y: state.placed.y };
   state.currentTile = null;
   state.placed = null;
   state.selectedMeeple = null;
