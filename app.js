@@ -70,7 +70,7 @@ if ("serviceWorker" in navigator) {
   ui.updateNotice.addEventListener("click", function () {
     if (!waitingWorker) return;
     cancelComputerTurn();
-    if (state && !watch) saveForHome(state);
+    if (state && !watch && !autoplay) saveForHome(state);
     reloadAfterUpdate = true;
     waitingWorker.postMessage({ type: "SKIP_WAITING" });
   });
@@ -278,7 +278,7 @@ function startConfiguredGame(replaceSavedGame) {
     ui.river.checked,
     gameRandom,
     replaceSavedGame,
-    watch
+    watch || autoplay
   );
   if (!state) return;
   pushGameHistory();
@@ -348,7 +348,7 @@ function cancelComputerTurn() {
 
 function showHome(fromBackNavigation) {
   cancelComputerTurn();
-  if (state && !watch) saveForHome(state);
+  if (state && !watch && !autoplay) saveForHome(state);
   show(ui.start);
   renderSetup();
   if (!fromBackNavigation && history.state && history.state[GAME_HISTORY_KEY]) {

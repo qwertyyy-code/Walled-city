@@ -2,7 +2,9 @@
  * game.js — Turn flow, legal placement, meeple claims, scoring, undo, and save.
  */
 
-const SAVE_KEY = "walled-city-save";
+const SAVE_KEY = typeof window !== "undefined" && window.__WALLED_CITY_TEST_SAVE_KEY__
+  ? window.__WALLED_CITY_TEST_SAVE_KEY__
+  : "walled-city-save";
 const FARM_POINTS_PER_CITY = 4;
 const SMALL_CITY_MAX_TILES = 2;
 const SMALL_CITY_POINTS_PER_TILE = 1;

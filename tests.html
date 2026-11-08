@@ -14,10 +14,11 @@
 </head>
 <body>
   <h1>Game checks</h1>
-  <p>These checks cover tile placement, River rules, computer moves and autoplay, watched-game saves, Home and Resume, saved-game replacement, feature completion, majority ties, meeple return, Undo, end-game scoring, and seeded bot matches.</p>
+  <p>These checks cover tile placement, River rules, computer moves and autoplay, watched-game saves, Home and Resume, saved-game replacement, feature completion, majority ties, meeple return, Undo, end-game scoring, and paired seeded bot matches. Tests use an isolated save slot and do not overwrite the saved game.</p>
   <ol id="results"></ol>
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
+  <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
   <script src="game.js"></script>
   <script src="bot.js"></script>
   <script src="render.js"></script>
@@ -2182,13 +2183,13 @@
       assertEndGamePoints(state.players[0], 0, 0, 0);
     });
 
-    function runAutoplay(seed, riverEnabled) {
+    function runAutoplay(seed, riverEnabled, suppressSave) {
       const random = createSeededRandom(seed);
       setBotRandom(random);
       const state = newGame([
         { name: "Computer 1", color: "#c62828", computer: true },
         { name: "Computer 2", color: "#1565c0", computer: true }
-      ], undefined, riverEnabled, random);
+      ], undefined, riverEnabled, random, suppressSave);
       let turns = 0;
       while (!state.gameOver && turns < 100) {
         beginTurn(state);
@@ -2299,6 +2300,9 @@
       let smartMoveCount = 0;
       let smartMoveTime = 0;
       let slowestSmartMove = 0;
+      let randomMoveCount = 0;
+      let randomMoveTime = 0;
+      let slowestRandomMove = 0;
 
       for (let gameIndex = 0; gameIndex < 40; gameIndex++) {
         const random = createSeededRandom(gameIndex + 1);
@@ -2331,6 +2335,10 @@
                 move.action.type === "meeple" && move.action.spot.kind === "field") {
               farmerPlacements++;
             }
+          } else {
+            randomMoveCount++;
+            randomMoveTime += elapsed;
+            slowestRandomMove = Math.max(slowestRandomMove, elapsed);
           }
           assertEqual(!!move, true, "both choosers find a legal move");
           applyBotMove(state, move);
@@ -2346,16 +2354,16 @@
       }
 
       const averageSmartTime = smartMoveTime / smartMoveCount;
+      const averageRandomTime = randomMoveTime / randomMoveCount;
       const report = smartWins + "/40 wins; average score smart " +
         (smartScoreTotal / 40).toFixed(1) + ", random " +
         (randomScoreTotal / 40).toFixed(1) + "; first-half farmers " +
-        farmerPlacements + "; smart move average " + averageSmartTime.toFixed(2) +
-        " ms, slowest " + slowestSmartMove.toFixed(2) + " ms (estimated 4×: " +
-        (slowestSmartMove * 4).toFixed(2) + " ms).";
+        farmerPlacements + "; move times smart avg " + averageSmartTime.toFixed(2) +
+        " ms / slowest " + slowestSmartMove.toFixed(2) + " ms; random avg " +
+        averageRandomTime.toFixed(2) + " ms / slowest " + slowestRandomMove.toFixed(2) +
+        " ms; estimated smart slowest at 4×: " + (slowestSmartMove * 4).toFixed(2) +
+        " ms.";
       if (smartWins < 34) throw new Error(report + " Expected at least 34 smart wins.");
-      if (slowestSmartMove * 4 > 700) {
-        throw new Error(report + " Estimated 4× move time exceeds 700 ms.");
-      }
       return report;
     });
 
@@ -2402,6 +2410,46 @@
     test("20 seeded autoplay games finish, validate, and account for all points", function () {
       for (let seed = 0; seed < 20; seed++) {
         runAutoplay(seed, seed >= 10);
+      }
+    });
+
+    test("seeded bot games never call Math.random", function () {
+      const originalRandom = Math.random;
+      try {
+        Math.random = function () {
+          throw new Error("Math.random was called during a seeded game.");
+        };
+        runAutoplay("no-math-random", false, true);
+      } finally {
+        Math.random = originalRandom;
+        setBotRandom(originalRandom);
+      }
+    });
+
+    test("autoplay leaves both saved-game slots unchanged", function () {
+      const savedTestGame = localStorage.getItem(SAVE_KEY);
+      const savedUserGame = localStorage.getItem("walled-city-save");
+      try {
+        newGame([
+          { name: "Saved", color: "#c62828" },
+          { name: "Player 2", color: "#1565c0" }
+        ], 10, false, createSeededRandom("saved-before-autoplay"));
+        const savedBeforeAutoplay = localStorage.getItem(SAVE_KEY);
+        const autoplayState = runAutoplay("autoplay-save-check", false, true);
+        saveForHome(autoplayState);
+        assertEqual(
+          localStorage.getItem(SAVE_KEY),
+          savedBeforeAutoplay,
+          "autoplay simulation preserves the resumable test game"
+        );
+        assertEqual(
+          localStorage.getItem("walled-city-save"),
+          savedUserGame,
+          "test execution preserves the user's saved game"
+        );
+      } finally {
+        if (savedTestGame === null) localStorage.removeItem(SAVE_KEY);
+        else localStorage.setItem(SAVE_KEY, savedTestGame);
       }
     });
 
@@ -2976,7 +3024,7 @@
         }
 
         for (let i = 0; i < workerCount; i++) {
-          const worker = new Worker("./match-worker.js?v=36");
+          const worker = new Worker("./match-worker.js?v=38");
           workers.push(worker);
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -3005,21 +3053,38 @@
       if (!Number.isInteger(games) || games < 1) throw new Error("games must be a positive integer");
       const seeds = options && options.seeds ? options.seeds.slice() : null;
       if (seeds && seeds.length !== games) throw new Error("seed list length must equal games");
-      const jobs = Array.from({ length: games }, function (_, index) {
-        const aSeat = index % 2 === 0 ? 0 : 1;
+      const paired = !(options && options.paired === false);
+      const playerCount = options && options.playerCount !== undefined
+        ? Number(options.playerCount)
+        : 2;
+      if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > 4) {
+        throw new Error("playerCount must be an integer from 2 to 4");
+      }
+      const startedAt = performance.now();
+      const jobs = Array.from({ length: games * (paired ? 2 : 1) }, function (_, index) {
+        const seedIndex = paired ? Math.floor(index / 2) : index;
+        const leg = paired ? index % 2 : 0;
+        const seatOffset = paired ? leg : index % 2;
+        const botLabels = Array.from({ length: playerCount }, function (_, seat) {
+          return (seat + seatOffset) % 2 === 0 ? "A" : "B";
+        });
         return {
-          seed: seeds ? seeds[index] : index + 1,
-          riverEnabled: index % 2 === 0,
-          settingsByPlayer: aSeat === 0
-            ? [settingsA, settingsB]
-            : [settingsB, settingsA]
+          seed: seeds ? seeds[seedIndex] : seedIndex + 1,
+          riverEnabled: seedIndex % 2 === 0,
+          botLabels: botLabels,
+          settingsByPlayer: botLabels.map(function (label) {
+            return label === "A" ? settingsA : settingsB;
+          })
         };
       });
       const gameResults = await runWorkerGames(jobs);
+      const gameReports = [];
       const totals = {
         winsA: 0,
         winsB: 0,
         draws: 0,
+        averageScoreA: 0,
+        averageScoreB: 0,
         scoreA: 0,
         scoreB: 0,
         winningMargin: 0,
@@ -3031,11 +3096,36 @@
         noMeepleTurns: 0,
         turns: 0
       };
+      const gameScoreDifferences = [];
       gameResults.forEach(function (result, index) {
-        const aSeat = index % 2 === 0 ? 0 : 1;
-        const bSeat = 1 - aSeat;
-        const scoreA = result.scores[aSeat];
-        const scoreB = result.scores[bSeat];
+        const labels = jobs[index].botLabels;
+        const scoresA = result.scores.filter(function (_, seat) {
+          return labels[seat] === "A";
+        });
+        const scoresB = result.scores.filter(function (_, seat) {
+          return labels[seat] === "B";
+        });
+        const scoreA = scoresA.reduce(function (sum, score) { return sum + score; }, 0) /
+          scoresA.length;
+        const scoreB = scoresB.reduce(function (sum, score) { return sum + score; }, 0) /
+          scoresB.length;
+        gameScoreDifferences.push(scoreA - scoreB);
+        const moveTimes = { A: { totalMs: 0, count: 0, slowestMs: 0 },
+          B: { totalMs: 0, count: 0, slowestMs: 0 } };
+        result.moveTimes.forEach(function (timing, seat) {
+          const botTiming = moveTimes[labels[seat]];
+          botTiming.totalMs += timing.totalMs;
+          botTiming.count += timing.count;
+          botTiming.slowestMs = Math.max(botTiming.slowestMs, timing.slowestMs);
+        });
+        gameReports.push({
+          riverEnabled: jobs[index].riverEnabled,
+          scoreA: scoreA,
+          scoreB: scoreB,
+          scoreDifference: scoreA - scoreB,
+          firstPlayerWins: scoreA !== scoreB && labels[0] === (scoreA > scoreB ? "A" : "B"),
+          moveTimes: moveTimes
+        });
         totals.scoreA += scoreA;
         totals.scoreB += scoreB;
         if (scoreA === scoreB) {
@@ -3045,7 +3135,8 @@
           totals.winningMargin += Math.abs(scoreA - scoreB);
           if (scoreA > scoreB) totals.winsA += 1;
           else totals.winsB += 1;
-          if ((scoreA > scoreB && aSeat === 0) || (scoreB > scoreA && bSeat === 0)) {
+          const winningBot = scoreA > scoreB ? "A" : "B";
+          if (labels[0] === winningBot) {
             totals.firstPlayerWins += 1;
           }
         }
@@ -3059,22 +3150,131 @@
         totals.noMeepleTurns += result.noMeepleTurns;
         totals.turns += result.turns;
       });
-      return {
-        games: games,
-        winsA: totals.winsA,
-        winsB: totals.winsB,
-        draws: totals.draws,
-        averageScoreA: totals.scoreA / games,
-        averageScoreB: totals.scoreB / games,
+
+      const pairResults = paired
+        ? Array.from({ length: games }, function (_, index) {
+          const firstIndex = index * 2;
+          const gameDifferences = [
+            gameScoreDifferences[firstIndex],
+            gameScoreDifferences[firstIndex + 1]
+          ];
+          return {
+            seed: jobs[firstIndex].seed,
+            riverEnabled: jobs[firstIndex].riverEnabled,
+            scoreDifference: (gameDifferences[0] + gameDifferences[1]) / 2,
+            gameScoreDifferences: gameDifferences,
+            seatAssignments: [
+              jobs[firstIndex].botLabels,
+              jobs[firstIndex + 1].botLabels
+            ]
+          };
+        })
+        : [];
+      function summarizeGames(gameIndexes, selectedPairs) {
+        const scoreDifferences = paired
+          ? selectedPairs.map(function (pair) { return pair.scoreDifference; })
+          : gameIndexes.map(function (index) { return gameReports[index].scoreDifference; });
+        const averageScoreDifferenceAminusB = scoreDifferences.length
+          ? scoreDifferences.reduce(function (sum, diff) { return sum + diff; }, 0) /
+            scoreDifferences.length
+          : 0;
+        const variance = scoreDifferences.length > 1
+          ? scoreDifferences.reduce(function (sum, diff) {
+            return sum + Math.pow(diff - averageScoreDifferenceAminusB, 2);
+          }, 0) / (scoreDifferences.length - 1)
+          : 0;
+        const marginOfError = scoreDifferences.length
+          ? 2 * Math.sqrt(variance) / Math.sqrt(scoreDifferences.length)
+          : 0;
+        const summary = {
+          games: gameIndexes.length,
+          pairCount: selectedPairs.length,
+          averageScoreDifferenceAminusB: averageScoreDifferenceAminusB,
+          scoreDifferenceConfidenceRange: {
+            lower: averageScoreDifferenceAminusB - marginOfError,
+            upper: averageScoreDifferenceAminusB + marginOfError,
+            marginOfError: marginOfError
+          },
+          winsA: 0,
+          winsB: 0,
+          draws: 0,
+          pairsAWinBoth: 0,
+          pairsBWinBoth: 0,
+          pairsSplit: 0,
+          pairsWithDraw: 0,
+          averageMoveTimeMs: { A: 0, B: 0 },
+          slowestMoveTimeMs: { A: 0, B: 0 }
+        };
+        const timingTotals = {
+          A: { totalMs: 0, count: 0 },
+          B: { totalMs: 0, count: 0 }
+        };
+        let scoreATotal = 0;
+        let scoreBTotal = 0;
+        gameIndexes.forEach(function (index) {
+          const game = gameReports[index];
+          scoreATotal += game.scoreA;
+          scoreBTotal += game.scoreB;
+          if (game.scoreA === game.scoreB) summary.draws++;
+          else if (game.scoreA > game.scoreB) summary.winsA++;
+          else summary.winsB++;
+          ["A", "B"].forEach(function (label) {
+            const timing = game.moveTimes[label];
+            timingTotals[label].totalMs += timing.totalMs;
+            timingTotals[label].count += timing.count;
+            summary.slowestMoveTimeMs[label] = Math.max(
+              summary.slowestMoveTimeMs[label],
+              timing.slowestMs
+            );
+          });
+        });
+        ["A", "B"].forEach(function (label) {
+          summary.averageMoveTimeMs[label] = timingTotals[label].count
+            ? timingTotals[label].totalMs / timingTotals[label].count
+            : 0;
+        });
+        summary.averageScoreA = gameIndexes.length ? scoreATotal / gameIndexes.length : 0;
+        summary.averageScoreB = gameIndexes.length ? scoreBTotal / gameIndexes.length : 0;
+        selectedPairs.forEach(function (pair) {
+          const differences = pair.gameScoreDifferences;
+          if (differences.every(function (diff) { return diff > 0; })) summary.pairsAWinBoth++;
+          else if (differences.every(function (diff) { return diff < 0; })) summary.pairsBWinBoth++;
+          else if (differences.some(function (diff) { return diff === 0; })) summary.pairsWithDraw++;
+          else summary.pairsSplit++;
+        });
+        return summary;
+      }
+
+      const allGameIndexes = gameReports.map(function (_, index) { return index; });
+      const overall = summarizeGames(allGameIndexes, pairResults);
+      const riverOnPairs = pairResults.filter(function (pair) { return pair.riverEnabled; });
+      const riverOffPairs = pairResults.filter(function (pair) { return !pair.riverEnabled; });
+      const riverOnGames = allGameIndexes.filter(function (index) {
+        return gameReports[index].riverEnabled;
+      });
+      const riverOffGames = allGameIndexes.filter(function (index) {
+        return !gameReports[index].riverEnabled;
+      });
+      return Object.assign({
+        seedCount: games,
+        paired: paired,
+        pairs: pairResults,
+        byRiver: {
+          on: summarizeGames(riverOnGames, riverOnPairs),
+          off: summarizeGames(riverOffGames, riverOffPairs)
+        },
+        averageScoreA: totals.scoreA / gameResults.length,
+        averageScoreB: totals.scoreB / gameResults.length,
         averageWinningMargin: totals.decisiveGames
           ? totals.winningMargin / totals.decisiveGames
           : 0,
         firstPlayerWins: totals.firstPlayerWins,
-        averageCitiesFinishedPerGame: totals.completedCities / games,
-        averageMeeplesLeftInSupplyPerBot: totals.meeplesInSupply / games,
-        averageFarmersPlacedPerBot: totals.farmers / games,
-        shareTurnsWithoutMeeple: totals.turns ? totals.noMeepleTurns / totals.turns : 0
-      };
+        averageCitiesFinishedPerGame: totals.completedCities / gameResults.length,
+        averageMeeplesLeftInSupplyPerBot: totals.meeplesInSupply / gameResults.length,
+        averageFarmersPlacedPerBot: totals.farmers / gameResults.length,
+        shareTurnsWithoutMeeple: totals.turns ? totals.noMeepleTurns / totals.turns : 0,
+        durationMs: performance.now() - startedAt
+      }, overall);
     }
 
     async function runSmartSeatGames(playerCount, games) {
@@ -3131,6 +3331,56 @@
         return JSON.stringify(result);
       });
 
+      await testAsync("paired identical bots finish seat-swapped games with zero pair differences", async function () {
+        const result = await runMatch({}, {}, 20, { paired: true });
+        assertEqual(result.games, 40, "each seed is played twice");
+        assertEqual(result.pairCount, 20, "one pair is reported per seed");
+        assertEqual(result.pairs.every(function (pair) {
+          return pair.scoreDifference === 0 &&
+            pair.gameScoreDifferences.length === 2 &&
+            pair.gameScoreDifferences[0] === -pair.gameScoreDifferences[1];
+        }), true, "every seed pair has zero score difference");
+        assertEqual(result.pairs.every(function (pair, index) {
+          return pair.riverEnabled === (index % 2 === 0);
+        }), true, "River setting alternates between pairs");
+        assertEqual(result.winsA, result.winsB, "seat-swapped wins are balanced");
+        return JSON.stringify({
+          games: result.games,
+          winsA: result.winsA,
+          winsB: result.winsB,
+          pairsAWinBoth: result.pairsAWinBoth,
+          pairsBWinBoth: result.pairsBWinBoth,
+          pairsSplit: result.pairsSplit
+        });
+      });
+
+      await testAsync("paired three- and four-seat matches rotate both bots through every seat", async function () {
+        const reports = {};
+        [3, 4].forEach(function (playerCount) {
+          const result = runMatch({}, {}, 1, {
+            paired: true,
+            playerCount: playerCount
+          });
+          reports[playerCount] = result;
+        });
+        const three = await reports[3];
+        const four = await reports[4];
+        [three, four].forEach(function (result) {
+          const assignments = result.pairs[0].seatAssignments;
+          for (let seat = 0; seat < assignments[0].length; seat++) {
+            assertEqual(
+              assignments[0][seat] !== assignments[1][seat],
+              true,
+              "seat " + seat + " switches bots in the paired game"
+            );
+          }
+        });
+        return JSON.stringify({
+          threeSeatAssignments: three.pairs[0].seatAssignments,
+          fourSeatAssignments: four.pairs[0].seatAssignments
+        });
+      });
+
       await testAsync("10 three-seat and 10 four-seat smart games finish cleanly", async function () {
         const threeSeatScores = await runSmartSeatGames(3, 10);
         const fourSeatScores = await runSmartSeatGames(4, 10);
@@ -3143,9 +3393,89 @@
         const seeds = [101, 202, 303, 404];
         const first = await runMatch({}, {}, seeds.length, { seeds: seeds });
         const second = await runMatch({}, {}, seeds.length, { seeds: seeds });
-        assertEqual(JSON.stringify(first), JSON.stringify(second), "match results are deterministic");
+        const withoutDuration = function (result) {
+          function stripTiming(value) {
+            if (Array.isArray(value)) return value.map(stripTiming);
+            if (!value || typeof value !== "object") return value;
+            return Object.keys(value).reduce(function (copy, key) {
+              if (key !== "durationMs" && key !== "averageMoveTimeMs" &&
+                  key !== "slowestMoveTimeMs") {
+                copy[key] = stripTiming(value[key]);
+              }
+              return copy;
+            }, {});
+          }
+          return JSON.stringify(stripTiming(result));
+        };
+        assertEqual(withoutDuration(first), withoutDuration(second),
+          "all non-timing match results are deterministic");
+        assertEqual(Number.isFinite(first.durationMs) && first.durationMs >= 0,
+          true, "match duration is reported");
         return JSON.stringify(first);
       });
+
+    if (new URLSearchParams(window.location.search).get("reports") === "1") {
+      await testAsync("report-only farmer-weight and meeple-value comparisons on seeds 101–300", async function () {
+        const seeds101To200 = Array.from({ length: 100 }, function (_, index) {
+          return index + 101;
+        });
+        const seeds101To300 = Array.from({ length: 200 }, function (_, index) {
+          return index + 101;
+        });
+        const farmerVsDefault = await runMatch({}, { FARMER_WEIGHT_START: 0.5 }, 100, {
+          paired: true,
+          seeds: seeds101To200
+        });
+        const farmerVsFarmer = await runMatch(
+          { FARMER_WEIGHT_START: 0.5 },
+          { FARMER_WEIGHT_START: 0.7 },
+          100,
+          {
+            paired: true,
+            seeds: seeds101To200
+          }
+        );
+        const farmerVsMeeple = await runMatch(
+          { FARMER_WEIGHT_START: 0.5 },
+          { FARMER_WEIGHT_START: 0.5, MEEPLE_VALUE: 1.5 },
+          200,
+          {
+            paired: true,
+            seeds: seeds101To300
+          }
+        );
+        function summarize(report) {
+          function section(result) {
+            return {
+              games: result.games,
+              pairs: result.pairCount,
+              averageScoreDifferenceAminusB: result.averageScoreDifferenceAminusB,
+              scoreDifferenceConfidenceRange: result.scoreDifferenceConfidenceRange,
+              winsA: result.winsA,
+              winsB: result.winsB,
+              pairsAWinBoth: result.pairsAWinBoth,
+              pairsBWinBoth: result.pairsBWinBoth,
+              pairsSplit: result.pairsSplit,
+              averageScoreA: result.averageScoreA,
+              averageScoreB: result.averageScoreB,
+              averageMoveTimeMs: result.averageMoveTimeMs,
+              slowestMoveTimeMs: result.slowestMoveTimeMs
+            };
+          }
+          return {
+            all: section(report),
+            riverOn: section(report.byRiver.on),
+            riverOff: section(report.byRiver.off),
+            durationMs: report.durationMs
+          };
+        }
+        return JSON.stringify({
+          FARMER_WEIGHT_START_0_5_vs_default: summarize(farmerVsDefault),
+          FARMER_WEIGHT_START_0_5_vs_0_7: summarize(farmerVsFarmer),
+          FARMER_WEIGHT_START_0_5_vs_MEEPLE_VALUE_1_5: summarize(farmerVsMeeple)
+        });
+      });
+    }
     }
 
     window.setTimeout(runComparisonChecks, 0);

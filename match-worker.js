@@ -16,6 +16,9 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   const state = newGame(players, undefined, riverEnabled, random, true);
   Object.defineProperty(state, "_botSimulation", { value: true });
   const startingMeeples = state.players.map(function (player) { return player.meeples; });
+  const moveTimes = state.players.map(function () {
+    return { totalMs: 0, count: 0, slowestMs: 0 };
+  });
   let turns = 0;
   let noMeepleTurns = 0;
   while (!state.gameOver && turns < 200) {
@@ -23,7 +26,12 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     if (state.gameOver) break;
     const current = state.current;
     const scores = state.players.map(function (player) { return player.score; });
+    const moveStarted = performance.now();
     const move = chooseMove(state, current, "smart", settingsByPlayer[current]);
+    const moveElapsed = performance.now() - moveStarted;
+    moveTimes[current].totalMs += moveElapsed;
+    moveTimes[current].count += 1;
+    moveTimes[current].slowestMs = Math.max(moveTimes[current].slowestMs, moveElapsed);
     if (!move) throw new Error("No legal move on turn " + turns);
     const rotations = (move.rotation - state.currentTile.rot + 4) % 4;
     for (let i = 0; i < rotations; i++) {
@@ -57,6 +65,7 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   return {
     scores: state.players.map(function (player) { return player.score; }),
     meeplesInSupply: state.players.map(function (player) { return player.meeples; }),
+    moveTimes: moveTimes,
     turns: turns,
     noMeepleTurns: noMeepleTurns,
     completedCities: allFeatures(state).filter(function (feature) {
