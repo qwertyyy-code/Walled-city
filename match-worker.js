@@ -1,4 +1,4 @@
-importScripts("./tiles.js", "./game.js", "./bot.js");
+importScripts("./tiles.js?v=40", "./game.js?v=40", "./bot.js?v=40");
 
 function countBoardMeeples(state, playerIndex) {
   return Object.keys(state.board).reduce(function (total, key) {

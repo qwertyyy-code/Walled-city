@@ -443,28 +443,34 @@ function restoreSnap(state, snap) {
 }
 
 function drawPlaceable(state) {
-  if (state.riverOpenEnd) {
-    while (state.riverDeck.length) {
-      const tile = state.riverDeck.shift();
-      if (tile.typeId === RIVER_LAKE_ID || anyLegalRotation(state, tile.typeId)) {
-        state.currentTile = { uid: tile.uid, typeId: tile.typeId, rot: 0 };
-        return true;
+  while (true) {
+    let tile;
+    if (state.riverOpenEnd) {
+      if (state.riverDeck.length) {
+        tile = state.riverDeck.shift();
+      } else {
+        state.riverOpenEnd = null;
+        state.riverLastTurn = null;
+        continue;
       }
-      state.discarded.push(tile);
+    } else {
+      if (!state.deck.length) {
+        state.currentTile = null;
+        return false;
+      }
+      tile = state.deck.shift();
     }
-    state.currentTile = null;
-    return false;
-  }
-  while (state.deck.length) {
-    const t = state.deck.shift();
-    if (anyLegalRotation(state, t.typeId)) {
-      state.currentTile = { uid: t.uid, typeId: t.typeId, rot: 0 };
+
+    if (anyLegalRotation(state, tile.typeId)) {
+      state.currentTile = { uid: tile.uid, typeId: tile.typeId, rot: 0 };
       return true;
     }
-    state.discarded.push(t);
+    state.discarded.push(tile);
+    if (tile.typeId === RIVER_LAKE_ID) {
+      state.riverOpenEnd = null;
+      state.riverLastTurn = null;
+    }
   }
-  state.currentTile = null;
-  return false;
 }
 
 function beginTurn(state) {

@@ -19,7 +19,7 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js"></script>
+  <script src="game.js?v=40"></script>
   <script src="bot.js"></script>
   <script src="render.js"></script>
   <script>
@@ -1418,6 +1418,13 @@
       return state;
     }
 
+    function unplaceableLakeGame() {
+      const state = riverGame(["river-lake"], ["B"]);
+      put(state, 0, 1, "river-straight", 1);
+      state.riverOpenEnd = { x: 0, y: 0, incomingEdge: N };
+      return state;
+    }
+
     function playRiverRotation(state, typeId, rotation, kind, index) {
       beginTurn(state);
       assertEqual(state.currentTile.typeId, typeId, "draw expected river tile");
@@ -1857,6 +1864,48 @@
 
       beginTurn(state);
       assertEqual(state.currentTile.typeId, "B", "normal tile follows the lake");
+    });
+
+    test("an unplaceable lake ends the river and draws a land tile for the same player", function () {
+      const state = unplaceableLakeGame();
+      assertEqual(legalCells(state, "river-lake").length, 0, "the lake cannot be placed");
+      const player = state.current;
+      beginTurn(state);
+      assertEqual(state.discarded.map(function (tile) { return tile.typeId; }).join(","),
+        "river-lake", "the unplaceable lake is discarded");
+      assertEqual(state.riverOpenEnd, null, "the river ends");
+      assertEqual(state.current, player, "the player does not change");
+      assertEqual(state.currentTile.typeId, "B", "the same turn draws a land tile");
+      assertEqual(legalCells(state, state.currentTile.typeId).length > 0, true,
+        "the drawn land tile has a legal placement");
+    });
+
+    test("undo and Home/Resume work after an unplaceable lake is discarded", function () {
+      const saved = localStorage.getItem(SAVE_KEY);
+      try {
+        const state = unplaceableLakeGame();
+        const player = state.current;
+        beginTurn(state);
+        saveForHome(state);
+        const resumed = loadSave();
+        assertEqual(resumed.currentTile.typeId, "B", "Resume restores the land tile");
+        assertEqual(resumed.riverOpenEnd, null, "Resume keeps the river ended");
+        assertEqual(resumed.discarded[0].typeId, "river-lake",
+          "Resume keeps the discarded lake");
+        assertEqual(resumed.current, player, "Resume keeps the same player");
+        const cell = legalCells(resumed, resumed.currentTile.typeId)[0];
+        assertEqual(selectPending(resumed, cell.x, cell.y), true, "select a land placement");
+        assertEqual(confirmPending(resumed), true, "confirm the resumed turn");
+        assertEqual(undoLast(resumed), true, "Undo restores the drawn land tile");
+        assertEqual(resumed.currentTile.typeId, "B", "Undo restores the same land tile");
+        assertEqual(resumed.riverOpenEnd, null, "Undo keeps the river ended");
+        assertEqual(resumed.discarded[0].typeId, "river-lake",
+          "Undo keeps the lake discarded");
+        assertEqual(resumed.current, player, "Undo keeps the same player");
+      } finally {
+        if (saved === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, saved);
+      }
     });
 
     test("River off keeps the normal start tile and 72-tile base deck", function () {
@@ -2996,57 +3045,82 @@
         jobs.length,
         Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4))
       );
-      return new Promise(function (resolve, reject) {
+      return new Promise(function (resolve) {
         const workers = [];
         const results = new Array(jobs.length);
         let nextJob = 0;
         let completed = 0;
-        let settled = false;
 
         function stopWorkers() {
           workers.forEach(function (worker) { worker.terminate(); });
         }
 
-        function fail(error) {
-          if (settled) return;
-          settled = true;
-          stopWorkers();
-          reject(error);
+        function finish(worker, index, result) {
+          results[index] = result;
+          completed += 1;
+          if (completed === jobs.length) {
+            stopWorkers();
+            resolve(results);
+          } else {
+            assign(worker);
+          }
         }
 
         function assign(worker) {
           if (nextJob >= jobs.length) {
+            worker.currentJobIndex = null;
             worker.terminate();
             return;
           }
           const index = nextJob++;
+          worker.currentJobIndex = index;
           worker.postMessage(Object.assign({ index: index }, jobs[index]));
         }
 
-        for (let i = 0; i < workerCount; i++) {
-          const worker = new Worker("./match-worker.js?v=38");
-          workers.push(worker);
+        function createWorker(workerIndex) {
+          const worker = new Worker("./match-worker.js?v=40");
+          workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
-              fail(new Error("seed " + jobs[event.data.index].seed + ": " + event.data.error));
+              finish(worker, event.data.index, { error: event.data.error });
               return;
             }
-            results[event.data.index] = event.data.result;
-            completed += 1;
-            if (completed === jobs.length) {
-              settled = true;
-              stopWorkers();
-              resolve(results);
-              return;
-            }
-            assign(worker);
+            finish(worker, event.data.index, event.data.result);
           };
           worker.onerror = function (event) {
-            fail(new Error("Match worker failed: " + event.message));
+            const index = worker.currentJobIndex;
+            if (index === null || index === undefined) return;
+            results[index] = { error: event.message || "Match worker failed." };
+            completed += 1;
+            worker.terminate();
+            if (completed === jobs.length) {
+              stopWorkers();
+              resolve(results);
+            } else if (nextJob < jobs.length) {
+              assign(createWorker(workerIndex));
+            }
           };
+          return worker;
+        }
+
+        for (let i = 0; i < workerCount; i++) {
+          const worker = createWorker(i);
           assign(worker);
         }
       });
+    }
+
+    function listFailedGames(jobs, results) {
+      return results.reduce(function (failedGames, result, index) {
+        if (result.error) {
+          failedGames.push({
+            seed: jobs[index].seed,
+            riverEnabled: jobs[index].riverEnabled,
+            error: result.error
+          });
+        }
+        return failedGames;
+      }, []);
     }
 
     async function runMatch(settingsA, settingsB, games, options) {
@@ -3077,8 +3151,10 @@
           })
         };
       });
-      const gameResults = await runWorkerGames(jobs);
-      const gameReports = [];
+      const workerResults = await runWorkerGames(jobs);
+      const gameReports = new Array(workerResults.length);
+      const failedGames = listFailedGames(jobs, workerResults);
+      const successfulGameIndexes = [];
       const totals = {
         winsA: 0,
         winsB: 0,
@@ -3096,8 +3172,10 @@
         noMeepleTurns: 0,
         turns: 0
       };
-      const gameScoreDifferences = [];
-      gameResults.forEach(function (result, index) {
+      const gameScoreDifferences = new Array(workerResults.length);
+      workerResults.forEach(function (result, index) {
+        if (result.error) return;
+        successfulGameIndexes.push(index);
         const labels = jobs[index].botLabels;
         const scoresA = result.scores.filter(function (_, seat) {
           return labels[seat] === "A";
@@ -3109,7 +3187,7 @@
           scoresA.length;
         const scoreB = scoresB.reduce(function (sum, score) { return sum + score; }, 0) /
           scoresB.length;
-        gameScoreDifferences.push(scoreA - scoreB);
+        gameScoreDifferences[index] = scoreA - scoreB;
         const moveTimes = { A: { totalMs: 0, count: 0, slowestMs: 0 },
           B: { totalMs: 0, count: 0, slowestMs: 0 } };
         result.moveTimes.forEach(function (timing, seat) {
@@ -3118,14 +3196,14 @@
           botTiming.count += timing.count;
           botTiming.slowestMs = Math.max(botTiming.slowestMs, timing.slowestMs);
         });
-        gameReports.push({
+        gameReports[index] = {
           riverEnabled: jobs[index].riverEnabled,
           scoreA: scoreA,
           scoreB: scoreB,
           scoreDifference: scoreA - scoreB,
           firstPlayerWins: scoreA !== scoreB && labels[0] === (scoreA > scoreB ? "A" : "B"),
           moveTimes: moveTimes
-        });
+        };
         totals.scoreA += scoreA;
         totals.scoreB += scoreB;
         if (scoreA === scoreB) {
@@ -3151,14 +3229,18 @@
         totals.turns += result.turns;
       });
 
-      const pairResults = paired
-        ? Array.from({ length: games }, function (_, index) {
+      const pairResults = [];
+      if (paired) {
+        for (let index = 0; index < games; index++) {
           const firstIndex = index * 2;
           const gameDifferences = [
             gameScoreDifferences[firstIndex],
             gameScoreDifferences[firstIndex + 1]
           ];
-          return {
+          if (gameDifferences.some(function (difference) {
+            return difference === undefined;
+          })) continue;
+          pairResults.push({
             seed: jobs[firstIndex].seed,
             riverEnabled: jobs[firstIndex].riverEnabled,
             scoreDifference: (gameDifferences[0] + gameDifferences[1]) / 2,
@@ -3167,9 +3249,9 @@
               jobs[firstIndex].botLabels,
               jobs[firstIndex + 1].botLabels
             ]
-          };
-        })
-        : [];
+          });
+        }
+      }
       function summarizeGames(gameIndexes, selectedPairs) {
         const scoreDifferences = paired
           ? selectedPairs.map(function (pair) { return pair.scoreDifference; })
@@ -3245,7 +3327,7 @@
         return summary;
       }
 
-      const allGameIndexes = gameReports.map(function (_, index) { return index; });
+      const allGameIndexes = successfulGameIndexes;
       const overall = summarizeGames(allGameIndexes, pairResults);
       const riverOnPairs = pairResults.filter(function (pair) { return pair.riverEnabled; });
       const riverOffPairs = pairResults.filter(function (pair) { return !pair.riverEnabled; });
@@ -3259,19 +3341,30 @@
         seedCount: games,
         paired: paired,
         pairs: pairResults,
+        failedGames: failedGames,
         byRiver: {
           on: summarizeGames(riverOnGames, riverOnPairs),
           off: summarizeGames(riverOffGames, riverOffPairs)
         },
-        averageScoreA: totals.scoreA / gameResults.length,
-        averageScoreB: totals.scoreB / gameResults.length,
+        averageScoreA: successfulGameIndexes.length
+          ? totals.scoreA / successfulGameIndexes.length
+          : 0,
+        averageScoreB: successfulGameIndexes.length
+          ? totals.scoreB / successfulGameIndexes.length
+          : 0,
         averageWinningMargin: totals.decisiveGames
           ? totals.winningMargin / totals.decisiveGames
           : 0,
         firstPlayerWins: totals.firstPlayerWins,
-        averageCitiesFinishedPerGame: totals.completedCities / gameResults.length,
-        averageMeeplesLeftInSupplyPerBot: totals.meeplesInSupply / gameResults.length,
-        averageFarmersPlacedPerBot: totals.farmers / gameResults.length,
+        averageCitiesFinishedPerGame: successfulGameIndexes.length
+          ? totals.completedCities / successfulGameIndexes.length
+          : 0,
+        averageMeeplesLeftInSupplyPerBot: successfulGameIndexes.length
+          ? totals.meeplesInSupply / successfulGameIndexes.length
+          : 0,
+        averageFarmersPlacedPerBot: successfulGameIndexes.length
+          ? totals.farmers / successfulGameIndexes.length
+          : 0,
         shareTurnsWithoutMeeple: totals.turns ? totals.noMeepleTurns / totals.turns : 0,
         durationMs: performance.now() - startedAt
       }, overall);
@@ -3286,6 +3379,10 @@
           settingsByPlayer: PLAYER_COLORS.slice(0, playerCount).map(function () { return {}; })
         };
       }));
+      const failures = results.map(function (result, index) {
+        return result.error ? { seed: index + 1, error: result.error } : null;
+      }).filter(Boolean);
+      assertEqual(failures.length, 0, "smart seat games finish: " + JSON.stringify(failures));
       results.forEach(function (result) {
         result.scores.forEach(function (score, seat) {
           scoresBySeat[seat] += score;
@@ -3293,6 +3390,100 @@
       });
       return scoresBySeat.map(function (score) { return score / games; });
     }
+
+    testAsync("seed 183 with River on finishes with 2, 3, and 4 smart bots", async function () {
+      for (const playerCount of [2, 3, 4]) {
+        const results = await runWorkerGames([{
+          seed: 183,
+          riverEnabled: true,
+          settingsByPlayer: Array.from({ length: playerCount }, function () { return {}; })
+        }]);
+        assertEqual(!!results[0].error, false,
+          playerCount + " bots report a finished game: " + (results[0].error || ""));
+        assertEqual(results[0].turns > 0, true, playerCount + " bots finish the game");
+      }
+      return "2, 3, and 4 players";
+    });
+
+    testAsync("failed worker games are reported without stopping later games", async function () {
+      const jobs = [
+        { seed: 901, riverEnabled: true, settingsByPlayer: [] },
+        { seed: 902, riverEnabled: false, settingsByPlayer: [{}, {}] }
+      ];
+      const results = await runWorkerGames(jobs);
+      const failures = listFailedGames(jobs, results);
+      assertEqual(!!results[0].error, true, "the invalid game reports its error");
+      assertEqual(results[1].turns > 0, true, "the next game still completes");
+      assertEqual(JSON.stringify(failures), JSON.stringify([{
+        seed: 901,
+        riverEnabled: true,
+        error: results[0].error
+      }]), "the report includes failed seed, River setting, and error");
+      return "failed game 901 was isolated; game 902 completed";
+    });
+
+    testAsync("random bots finish River games for seeds 1–500 with legal draws", async function () {
+      let gamesDiscardingLake = 0;
+      let gamesDiscardingRiverTile = 0;
+      const failures = [];
+      for (let seed = 1; seed <= 500; seed++) {
+        const random = createSeededRandom(seed);
+        setBotRandom(random);
+        const players = PLAYER_COLORS.slice(0, 2).map(function (color) {
+          return { name: color.name, color: color.hex, computer: true };
+        });
+        const state = newGame(players, undefined, true, random, true);
+        Object.defineProperty(state, "_botSimulation", { value: true });
+        let discardedLake = false;
+        let discardedRiver = false;
+        let turns = 0;
+        try {
+          while (!state.gameOver && turns < 200) {
+            const discardedBefore = state.discarded.length;
+            beginTurn(state);
+            state.discarded.slice(discardedBefore).forEach(function (tile) {
+              if (!RIVER_TILE_TYPES[tile.typeId]) return;
+              discardedRiver = true;
+              if (tile.typeId === RIVER_LAKE_ID) discardedLake = true;
+            });
+            if (state.gameOver) break;
+            assertEqual(anyLegalRotation(state, state.currentTile.typeId), true,
+              "seed " + seed + " draws a legal tile on turn " + turns);
+            const move = chooseMove(state, state.current, "random");
+            if (!move) throw new Error("no legal move on turn " + turns);
+            const rotationSteps = (move.rotation - state.currentTile.rot + 4) % 4;
+            for (let rotation = 0; rotation < rotationSteps; rotation++) {
+              if (!rotateCurrent(state, 1)) throw new Error("rotation rejected on turn " + turns);
+            }
+            if (!selectPending(state, move.x, move.y)) {
+              throw new Error("placement rejected on turn " + turns);
+            }
+            if (move.action && !selectPendingMeeple(
+              state, move.action.spot.kind, move.action.spot.index
+            )) {
+              throw new Error("meeple rejected on turn " + turns);
+            }
+            if (!confirmPending(state, false)) throw new Error("turn rejected on turn " + turns);
+            turns++;
+          }
+          if (!state.gameOver) throw new Error("game did not finish within 200 turns");
+          if (validateBoard(state).length) throw new Error("finished board is invalid");
+        } catch (error) {
+          failures.push({ seed: seed, error: error.message });
+        }
+        if (discardedLake) gamesDiscardingLake++;
+        if (discardedRiver) gamesDiscardingRiverTile++;
+        if (seed % 25 === 0) await new Promise(function (resolve) {
+          setTimeout(resolve, 0);
+        });
+      }
+      assertEqual(failures.length, 0, "all random River games finish cleanly: " +
+        JSON.stringify(failures.slice(0, 10)));
+      return JSON.stringify({
+        gamesDiscardingLake: gamesDiscardingLake,
+        gamesDiscardingAnyRiverTile: gamesDiscardingRiverTile
+      });
+    });
 
     test("watched games do not overwrite the saved game", function () {
       const saved = localStorage.getItem(SAVE_KEY);
@@ -3328,11 +3519,15 @@
     async function runComparisonChecks() {
       await testAsync("runMatch({}, {}, 40) ends cleanly and reports all comparison and play statistics", async function () {
         const result = await runMatch({}, {}, 40);
+        assertEqual(result.failedGames.length, 0,
+          "all games complete: " + JSON.stringify(result.failedGames));
         return JSON.stringify(result);
       });
 
       await testAsync("paired identical bots finish seat-swapped games with zero pair differences", async function () {
         const result = await runMatch({}, {}, 20, { paired: true });
+        assertEqual(result.failedGames.length, 0,
+          "all paired games complete: " + JSON.stringify(result.failedGames));
         assertEqual(result.games, 40, "each seed is played twice");
         assertEqual(result.pairCount, 20, "one pair is reported per seed");
         assertEqual(result.pairs.every(function (pair) {
@@ -3365,6 +3560,8 @@
         });
         const three = await reports[3];
         const four = await reports[4];
+        assertEqual(three.failedGames.length + four.failedGames.length, 0,
+          "all multi-seat games complete");
         [three, four].forEach(function (result) {
           const assignments = result.pairs[0].seatAssignments;
           for (let seat = 0; seat < assignments[0].length; seat++) {
@@ -3393,6 +3590,8 @@
         const seeds = [101, 202, 303, 404];
         const first = await runMatch({}, {}, seeds.length, { seeds: seeds });
         const second = await runMatch({}, {}, seeds.length, { seeds: seeds });
+        assertEqual(first.failedGames.length + second.failedGames.length, 0,
+          "all repeatability games complete");
         const withoutDuration = function (result) {
           function stripTiming(value) {
             if (Array.isArray(value)) return value.map(stripTiming);
@@ -3445,6 +3644,8 @@
           }
         );
         function summarize(report) {
+          assertEqual(report.failedGames.length, 0,
+            "report-only games complete: " + JSON.stringify(report.failedGames));
           function section(result) {
             return {
               games: result.games,
