@@ -13,9 +13,10 @@ const MONASTERY_COMPLETION_CHANCE = {
   floor: 0.3
 };
 const COMPLETION_TILE_WINDOW = 15;
-const FARMER_WEIGHT = { early: 0.3, late: 1.0 };
+const CLASSIC_SETTINGS = { FARMER_WEIGHT_START: 0.3, MEEPLE_VALUE: 3 };
+const FARMER_WEIGHT = { early: 0.7, late: 1.0 };
 const FARMER_WEIGHT_TRANSITION_PROGRESS = 0.5;
-const MEEPLE_VALUE = 3;
+const MEEPLE_VALUE = 1.5;
 const MEEPLE_ACTION_SHORTLIST_SIZE = 8;
 
 let botRandom = Math.random;

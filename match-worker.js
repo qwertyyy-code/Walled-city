@@ -1,4 +1,4 @@
-importScripts("./tiles.js?v=40", "./game.js?v=40", "./bot.js?v=40");
+importScripts("./tiles.js?v=41", "./game.js?v=41", "./bot.js?v=41");
 
 function countBoardMeeples(state, playerIndex) {
   return Object.keys(state.board).reduce(function (total, key) {
@@ -19,6 +19,7 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   const moveTimes = state.players.map(function () {
     return { totalMs: 0, count: 0, slowestMs: 0 };
   });
+  const noMeepleTurnsByPlayer = state.players.map(function () { return 0; });
   let turns = 0;
   let noMeepleTurns = 0;
   while (!state.gameOver && turns < 200) {
@@ -47,7 +48,10 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     )) {
       throw new Error("A legal meeple placement was rejected on turn " + turns);
     }
-    if (!move.action) noMeepleTurns += 1;
+    if (!move.action) {
+      noMeepleTurns += 1;
+      noMeepleTurnsByPlayer[current] += 1;
+    }
     if (!confirmPending(state, false)) throw new Error("Turn " + turns + " was rejected.");
     state.players.forEach(function (player, index) {
       if (player.meeples + countBoardMeeples(state, index) !== startingMeeples[index]) {
@@ -68,6 +72,10 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     moveTimes: moveTimes,
     turns: turns,
     noMeepleTurns: noMeepleTurns,
+    noMeepleTurnsByPlayer: noMeepleTurnsByPlayer,
+    farmPoints: state.players.map(function (player) {
+      return player.endGamePoints.farms;
+    }),
     completedCities: allFeatures(state).filter(function (feature) {
       return feature.kind === "city" && featureComplete(state, feature);
     }).length,

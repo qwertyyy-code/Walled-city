@@ -1,7 +1,7 @@
 /*
  * sw.js — Caches every app file so the game works offline after first load.
  */
-const CACHE = "walled-city-v40";
+const CACHE = "walled-city-v41";
 const FILES = [
   "./",
   "./index.html",

@@ -19,8 +19,8 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js?v=40"></script>
-  <script src="bot.js"></script>
+  <script src="game.js?v=41"></script>
+  <script src="bot.js?v=41"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -2302,7 +2302,7 @@
     test("smart bot finishes its own city when the held tile can close it", function () {
       const state = cityChoiceState(true);
       setBotRandom(createSeededRandom("smart-own-city"));
-      const move = chooseMove(state, 0);
+      const move = chooseMove(state, 0, "smart", CLASSIC_SETTINGS);
       assertEqual(move.x, -1, "move closes the missing side");
       assertEqual(move.y, 0, "move closes the missing side");
       assertEqual(move.rotation, 1, "city edge faces the opening");
@@ -2314,7 +2314,7 @@
     test("smart bot avoids completing an opponent city when a neutral move exists", function () {
       const state = cityChoiceState(false);
       setBotRandom(createSeededRandom("smart-avoid-opponent"));
-      const move = chooseMove(state, 0);
+      const move = chooseMove(state, 0, "smart", CLASSIC_SETTINGS);
       assertEqual(move.x === -1 && move.y === 0, false, "do not close opponent city");
       assertEqual(move.action, null, "bot has no meeples for an unrelated claim");
       const simulated = simulatedTurn(state, 0, move);
@@ -3078,7 +3078,7 @@
         }
 
         function createWorker(workerIndex) {
-          const worker = new Worker("./match-worker.js?v=40");
+          const worker = new Worker("./match-worker.js?v=41");
           workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -3196,13 +3196,39 @@
           botTiming.count += timing.count;
           botTiming.slowestMs = Math.max(botTiming.slowestMs, timing.slowestMs);
         });
+        function summarizeBot(label) {
+          const seats = labels.map(function (botLabel, seat) {
+            return botLabel === label ? seat : -1;
+          }).filter(function (seat) { return seat >= 0; });
+          return {
+            meeplesLeftInSupply: seats.reduce(function (sum, seat) {
+              return sum + result.meeplesInSupply[seat];
+            }, 0) / seats.length,
+            farmersPlaced: seats.reduce(function (sum, seat) {
+              return sum + result.farmers[seat];
+            }, 0) / seats.length,
+            farmPoints: seats.reduce(function (sum, seat) {
+              return sum + result.farmPoints[seat];
+            }, 0) / seats.length,
+            noMeepleTurns: seats.reduce(function (sum, seat) {
+              return sum + result.noMeepleTurnsByPlayer[seat];
+            }, 0),
+            turns: seats.reduce(function (sum, seat) {
+              return sum + result.moveTimes[seat].count;
+            }, 0)
+          };
+        }
         gameReports[index] = {
           riverEnabled: jobs[index].riverEnabled,
           scoreA: scoreA,
           scoreB: scoreB,
           scoreDifference: scoreA - scoreB,
           firstPlayerWins: scoreA !== scoreB && labels[0] === (scoreA > scoreB ? "A" : "B"),
-          moveTimes: moveTimes
+          moveTimes: moveTimes,
+          botStats: {
+            A: summarizeBot("A"),
+            B: summarizeBot("B")
+          }
         };
         totals.scoreA += scoreA;
         totals.scoreB += scoreB;
@@ -3285,11 +3311,19 @@
           pairsSplit: 0,
           pairsWithDraw: 0,
           averageMoveTimeMs: { A: 0, B: 0 },
-          slowestMoveTimeMs: { A: 0, B: 0 }
+          slowestMoveTimeMs: { A: 0, B: 0 },
+          averageMeeplesLeftInSupply: { A: 0, B: 0 },
+          averageFarmersPlaced: { A: 0, B: 0 },
+          averageFarmPoints: { A: 0, B: 0 },
+          shareTurnsWithoutMeeple: { A: 0, B: 0 }
         };
         const timingTotals = {
           A: { totalMs: 0, count: 0 },
           B: { totalMs: 0, count: 0 }
+        };
+        const playTotals = {
+          A: { meeples: 0, farmers: 0, farmPoints: 0, noMeepleTurns: 0, turns: 0 },
+          B: { meeples: 0, farmers: 0, farmPoints: 0, noMeepleTurns: 0, turns: 0 }
         };
         let scoreATotal = 0;
         let scoreBTotal = 0;
@@ -3308,11 +3342,30 @@
               summary.slowestMoveTimeMs[label],
               timing.slowestMs
             );
+            const stats = game.botStats[label];
+            const totals = playTotals[label];
+            totals.meeples += stats.meeplesLeftInSupply;
+            totals.farmers += stats.farmersPlaced;
+            totals.farmPoints += stats.farmPoints;
+            totals.noMeepleTurns += stats.noMeepleTurns;
+            totals.turns += stats.turns;
           });
         });
         ["A", "B"].forEach(function (label) {
           summary.averageMoveTimeMs[label] = timingTotals[label].count
             ? timingTotals[label].totalMs / timingTotals[label].count
+            : 0;
+          summary.averageMeeplesLeftInSupply[label] = gameIndexes.length
+            ? playTotals[label].meeples / gameIndexes.length
+            : 0;
+          summary.averageFarmersPlaced[label] = gameIndexes.length
+            ? playTotals[label].farmers / gameIndexes.length
+            : 0;
+          summary.averageFarmPoints[label] = gameIndexes.length
+            ? playTotals[label].farmPoints / gameIndexes.length
+            : 0;
+          summary.shareTurnsWithoutMeeple[label] = playTotals[label].turns
+            ? playTotals[label].noMeepleTurns / playTotals[label].turns
             : 0;
         });
         summary.averageScoreA = gameIndexes.length ? scoreATotal / gameIndexes.length : 0;
@@ -3510,10 +3563,12 @@
     test("bot setting overrides are scoped and preserve default weights", function () {
       const settingsA = effectiveBotSettings({ FARMER_WEIGHT_START: 0.5 });
       const settingsB = effectiveBotSettings({});
+      const classic = effectiveBotSettings(CLASSIC_SETTINGS);
       assertEqual(settingsA.FARMER_WEIGHT_START, 0.5, "A receives its farmer weight override");
-      assertEqual(settingsB.FARMER_WEIGHT_START, 0.3, "B retains the default farmer weight");
-      assertEqual(effectiveBotSettings({}).FARMER_WEIGHT_START, 0.3,
-        "the bot default remains unchanged");
+      assertEqual(settingsB.FARMER_WEIGHT_START, 0.7, "B retains the default farmer weight");
+      assertEqual(settingsB.MEEPLE_VALUE, 1.5, "B retains the default meeple value");
+      assertEqual(classic.FARMER_WEIGHT_START, 0.3, "classic preset keeps its farmer weight");
+      assertEqual(classic.MEEPLE_VALUE, 3, "classic preset keeps its meeple value");
     });
 
     async function runComparisonChecks() {
@@ -3524,8 +3579,9 @@
         return JSON.stringify(result);
       });
 
-      await testAsync("paired identical bots finish seat-swapped games with zero pair differences", async function () {
-        const result = await runMatch({}, {}, 20, { paired: true });
+      await testAsync("paired identical new-default bots finish with zero pair differences", async function () {
+        const seeds = Array.from({ length: 20 }, function (_, index) { return index + 641; });
+        const result = await runMatch({}, {}, 20, { paired: true, seeds: seeds });
         assertEqual(result.failedGames.length, 0,
           "all paired games complete: " + JSON.stringify(result.failedGames));
         assertEqual(result.games, 40, "each seed is played twice");
@@ -3674,6 +3730,72 @@
           FARMER_WEIGHT_START_0_5_vs_default: summarize(farmerVsDefault),
           FARMER_WEIGHT_START_0_5_vs_0_7: summarize(farmerVsFarmer),
           FARMER_WEIGHT_START_0_5_vs_MEEPLE_VALUE_1_5: summarize(farmerVsMeeple)
+        });
+      });
+    }
+
+    if (new URLSearchParams(window.location.search).get("reports") === "round2") {
+      await testAsync("report-only classic vs new defaults on seeds 501–600, then isolated new-default speed", async function () {
+        const seeds501To600 = Array.from({ length: 100 }, function (_, index) {
+          return index + 501;
+        });
+        const classicVsDefault = await runMatch(
+          CLASSIC_SETTINGS,
+          {},
+          seeds501To600.length,
+          { paired: true, seeds: seeds501To600 }
+        );
+        assertEqual(classicVsDefault.failedGames.length, 0,
+          "all comparison games complete: " + JSON.stringify(classicVsDefault.failedGames));
+
+        function summarize(report) {
+          function section(result) {
+            return {
+              games: result.games,
+              pairs: result.pairCount,
+              averageScoreDifferenceAminusB: result.averageScoreDifferenceAminusB,
+              scoreDifferenceConfidenceRange: result.scoreDifferenceConfidenceRange,
+              winsA: result.winsA,
+              winsB: result.winsB,
+              pairsAWinBoth: result.pairsAWinBoth,
+              pairsBWinBoth: result.pairsBWinBoth,
+              pairsSplit: result.pairsSplit,
+              pairsWithDraw: result.pairsWithDraw,
+              averageScoreA: result.averageScoreA,
+              averageScoreB: result.averageScoreB,
+              averageMoveTimeMs: result.averageMoveTimeMs,
+              slowestMoveTimeMs: result.slowestMoveTimeMs,
+              averageMeeplesLeftInSupply: result.averageMeeplesLeftInSupply,
+              averageFarmersPlaced: result.averageFarmersPlaced,
+              averageFarmPoints: result.averageFarmPoints,
+              shareTurnsWithoutMeeple: result.shareTurnsWithoutMeeple
+            };
+          }
+          return {
+            all: section(report),
+            riverOn: section(report.byRiver.on),
+            riverOff: section(report.byRiver.off),
+            durationMs: report.durationMs
+          };
+        }
+
+        const seeds601To640 = Array.from({ length: 40 }, function (_, index) {
+          return index + 601;
+        });
+        const speedRun = await runMatch({}, {}, seeds601To640.length, {
+          paired: false,
+          seeds: seeds601To640
+        });
+        assertEqual(speedRun.failedGames.length, 0,
+          "all isolated speed games complete: " + JSON.stringify(speedRun.failedGames));
+        return JSON.stringify({
+          CLASSIC_SETTINGS_vs_new_defaults: summarize(classicVsDefault),
+          new_default_speed_40_games: {
+            games: speedRun.games,
+            averageMoveTimeMs: speedRun.averageMoveTimeMs,
+            slowestMoveTimeMs: speedRun.slowestMoveTimeMs,
+            durationMs: speedRun.durationMs
+          }
         });
       });
     }
