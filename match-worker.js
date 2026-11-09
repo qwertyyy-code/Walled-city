@@ -1,10 +1,55 @@
-importScripts("./tiles.js?v=41", "./game.js?v=41", "./bot.js?v=41");
+importScripts("./tiles.js?v=42", "./game.js?v=42", "./bot.js?v=42");
 
 function countBoardMeeples(state, playerIndex) {
   return Object.keys(state.board).reduce(function (total, key) {
     const placed = state.board[key].meeple;
     return total + (placed && placed.player === playerIndex ? 1 : 0);
   }, 0);
+}
+
+function opponentFeatureChances(state, playerIndex, settings) {
+  const resolvedSettings = effectiveBotSettings(settings);
+  const tilesLeft = state.deck.length + state.riverDeck.length;
+  const completionCache = resolvedSettings.COMPLETION_MODEL === "pile"
+    ? createPileCompletionCache(state)
+    : null;
+  return allFeatures(state).reduce(function (features, feature) {
+    if ((feature.kind !== "city" && feature.kind !== "road") ||
+      featureComplete(state, feature)) return features;
+    const counts = featureMeeples(state, feature);
+    if (!counts.some(function (count, index) {
+      return index !== playerIndex && count > 0;
+    })) return features;
+    const anchor = feature.nodes[0];
+    features.push({
+      kind: feature.kind,
+      x: anchor.x,
+      y: anchor.y,
+      index: anchor.index,
+      chance: completionChance(state, feature, tilesLeft, resolvedSettings, completionCache)
+    });
+    return features;
+  }, []);
+}
+
+function moveBlocksOpponentFeature(after, playerIndex, beforeFeatures, settings) {
+  if (!beforeFeatures.some(function (feature) { return feature.chance > 0; })) return false;
+  const resolvedSettings = effectiveBotSettings(settings);
+  const tilesLeft = after.deck.length + after.riverDeck.length;
+  const completionCache = resolvedSettings.COMPLETION_MODEL === "pile"
+    ? createPileCompletionCache(after)
+    : null;
+  const afterFeatures = allFeatures(after);
+  return beforeFeatures.some(function (previous) {
+    if (previous.chance <= 0) return false;
+    const current = afterFeatures.filter(function (feature) {
+      return feature.kind === previous.kind && feature.nodes.some(function (node) {
+        return node.x === previous.x && node.y === previous.y && node.index === previous.index;
+      });
+    })[0];
+    return !!current && !featureComplete(after, current) &&
+      completionChance(after, current, tilesLeft, resolvedSettings, completionCache) === 0;
+  });
 }
 
 function playGame(seed, riverEnabled, settingsByPlayer) {
@@ -20,6 +65,7 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     return { totalMs: 0, count: 0, slowestMs: 0 };
   });
   const noMeepleTurnsByPlayer = state.players.map(function () { return 0; });
+  const blockingMovesByPlayer = state.players.map(function () { return 0; });
   let turns = 0;
   let noMeepleTurns = 0;
   while (!state.gameOver && turns < 200) {
@@ -27,6 +73,8 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     if (state.gameOver) break;
     const current = state.current;
     const scores = state.players.map(function (player) { return player.score; });
+    const blockingSettings = settingsByPlayer[current];
+    const opponentFeaturesBefore = opponentFeatureChances(state, current, blockingSettings);
     const moveStarted = performance.now();
     const move = chooseMove(state, current, "smart", settingsByPlayer[current]);
     const moveElapsed = performance.now() - moveStarted;
@@ -53,6 +101,9 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
       noMeepleTurnsByPlayer[current] += 1;
     }
     if (!confirmPending(state, false)) throw new Error("Turn " + turns + " was rejected.");
+    if (moveBlocksOpponentFeature(state, current, opponentFeaturesBefore, blockingSettings)) {
+      blockingMovesByPlayer[current] += 1;
+    }
     state.players.forEach(function (player, index) {
       if (player.meeples + countBoardMeeples(state, index) !== startingMeeples[index]) {
         throw new Error("Meeple total changed for seat " + index + " on turn " + turns);
@@ -73,6 +124,7 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     turns: turns,
     noMeepleTurns: noMeepleTurns,
     noMeepleTurnsByPlayer: noMeepleTurnsByPlayer,
+    blockingMovesByPlayer: blockingMovesByPlayer,
     farmPoints: state.players.map(function (player) {
       return player.endGamePoints.farms;
     }),

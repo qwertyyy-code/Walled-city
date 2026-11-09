@@ -19,8 +19,8 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js?v=41"></script>
-  <script src="bot.js?v=41"></script>
+  <script src="game.js?v=42"></script>
+  <script src="bot.js?v=42"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -2299,6 +2299,133 @@
       return state;
     }
 
+    function pileCityState(leaveRareTileInPile) {
+      const state = testState();
+      state.players[0].meeples = 6;
+      put(state, 0, 0, "Q", 0, meeple(0, "city", 0));
+      put(state, 0, 1, "B", 0);
+      state.board["0,1"].start = true;
+      put(state, 1, 0, "E", 3);
+      put(state, -1, 0, "E", 1);
+      put(state, 0, -2, "B", 0);
+      put(state, 1, -1, "B", 0);
+      put(state, -1, -1, "B", 0);
+      put(state, 0, -3, "E", 1);
+      if (!leaveRareTileInPile) put(state, 2, 0, "E", 0);
+      state.current = 0;
+      state.phase = "place";
+      state.currentTile = { uid: "closing-city", typeId: "E", rot: 0 };
+
+      const remaining = {};
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        remaining[typeId] = TILE_TYPES[typeId].count;
+      });
+      Object.keys(state.board).forEach(function (key) {
+        remaining[state.board[key].typeId] -= 1;
+      });
+      remaining[state.currentTile.typeId] -= 1;
+      state.deck = Object.keys(remaining).reduce(function (tiles, typeId) {
+        for (let i = 0; i < remaining[typeId]; i++) {
+          tiles.push({ uid: typeId + "-remaining-" + i, typeId: typeId });
+        }
+        return tiles;
+      }, []);
+      return state;
+    }
+
+    function easyPileHoleState() {
+      const state = testState();
+      put(state, 0, 0, "D", 0, meeple(0, "city", 0));
+      put(state, 0, 1, "B", 0);
+      state.board["0,1"].start = true;
+      const remaining = {};
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        remaining[typeId] = TILE_TYPES[typeId].count;
+      });
+      Object.keys(state.board).forEach(function (key) {
+        remaining[state.board[key].typeId] -= 1;
+      });
+      state.deck = Object.keys(remaining).reduce(function (tiles, typeId) {
+        for (let i = 0; i < remaining[typeId]; i++) {
+          tiles.push({ uid: typeId + "-remaining-" + i, typeId: typeId });
+        }
+        return tiles;
+      }, []);
+      return state;
+    }
+
+    function blockingCityState() {
+      const state = testState();
+      state.players[0].meeples = 0;
+      state.players[1].meeples = 6;
+      put(state, 0, 0, "D", 0, meeple(1, "city", 0));
+      put(state, 0, 1, "B", 0);
+      state.board["0,1"].start = true;
+      put(state, 1, 0, "V", 0);
+      state.current = 0;
+      state.phase = "place";
+      state.currentTile = { uid: "F-blocker", typeId: "F", rot: 0 };
+
+      const remaining = {};
+      Object.keys(TILE_TYPES).forEach(function (typeId) {
+        remaining[typeId] = TILE_TYPES[typeId].count;
+      });
+      Object.keys(state.board).forEach(function (key) {
+        remaining[state.board[key].typeId] -= 1;
+      });
+      remaining[state.currentTile.typeId] -= 1;
+      const fullPile = Object.keys(remaining).reduce(function (tiles, typeId) {
+        for (let i = 0; i < remaining[typeId]; i++) {
+          tiles.push({ uid: typeId + "-remaining-" + i, typeId: typeId });
+        }
+        return tiles;
+      }, []);
+      const blockedState = clone(state);
+      put(blockedState, 1, -1, "F", 0);
+      state.deck = fullPile.filter(function (tile) {
+        return !legalRotationsAt(blockedState, tile.typeId, 0, -1).length;
+      });
+      state.discarded = fullPile.filter(function (tile) {
+        return legalRotationsAt(blockedState, tile.typeId, 0, -1).length > 0;
+      });
+      return state;
+    }
+
+    function blockingMoveParts(state, move, model) {
+      const settings = effectiveBotSettings({ COMPLETION_MODEL: model });
+      const simulated = simulatedTurn(state, 0, move);
+      const tilesLeft = simulated.deck.length + simulated.riverDeck.length;
+      const startCount = countTilesAtStart(state);
+      const city = allFeatures(simulated).filter(function (feature) {
+        return feature.kind === "city" && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 0;
+        });
+      })[0];
+      const chance = completionChance(simulated, city, tilesLeft, settings);
+      const endValue = featurePoints(simulated, city, false);
+      const cityValue = endValue + chance *
+        (featurePoints(simulated, city, true) - endValue);
+      const farmCopy = clone(simulated);
+      scoreFarms(farmCopy);
+      const farmPoints = simulated.players.map(function (player, index) {
+        return farmCopy.players[index].score - player.score;
+      });
+      const weight = farmerWeight(tilesLeft, startCount, settings);
+      const values = playerValues(clone(simulated), tilesLeft, startCount, settings);
+      const bestOpponent = Math.max(values[1], 0);
+      return {
+        cityValue: cityValue,
+        completionChance: chance,
+        meepleValue: simulated.players.map(function (player) {
+          return settings.MEEPLE_VALUE * player.meeples * tilesLeft / startCount;
+        }),
+        farmPoints: farmPoints,
+        weightedFarmValues: farmPoints.map(function (points) { return points * weight; }),
+        bestOpponentValue: bestOpponent,
+        moveScore: values[0] - bestOpponent
+      };
+    }
+
     test("smart bot finishes its own city when the held tile can close it", function () {
       const state = cityChoiceState(true);
       setBotRandom(createSeededRandom("smart-own-city"));
@@ -2309,6 +2436,113 @@
       const simulated = simulatedTurn(state, 0, move);
       assertEqual(simulated.players[0].score, 12, "completed city scores through game rules");
       assertEqual(simulated.board["0,0"].meeple, null, "completed city returns the meeple");
+    });
+
+    test("pile model finishes a city when its sole fitting tile is drawn", function () {
+      const state = pileCityState(false);
+      const hole = { x: 0, y: -1 };
+      assertEqual(JSON.stringify(legalRotationsAt(state, "E", hole.x, hole.y)),
+        JSON.stringify([2]), "the drawn E fits the city's only hole");
+      assertEqual(createPileCompletionCache(state).fittingCountAt(hole.x, hole.y),
+        0, "no other fitting tile remains in the pile");
+      setBotRandom(createSeededRandom("pile-own-city"));
+      const move = chooseMove(state, 0, "smart", { COMPLETION_MODEL: "pile" });
+      assertEqual(move.x, hole.x, "bot places the drawn tile in the city hole");
+      assertEqual(move.y, hole.y, "bot places the drawn tile in the city hole");
+      const simulated = simulatedTurn(state, 0, move);
+      const city = allFeatures(simulated).filter(function (feature) {
+        return feature.kind === "city" && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 0;
+        });
+      })[0];
+      assertEqual(featureComplete(simulated, city), true, "the bot completes its city");
+      assertEqual(simulated.players[0].score, 10, "completed city scores through game rules");
+    });
+
+    test("pile model assigns zero chance when no remaining tile fits a city hole", function () {
+      const state = pileCityState(false);
+      const city = allFeatures(state).filter(function (feature) {
+        return feature.kind === "city" && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 0;
+        });
+      })[0];
+      const settings = effectiveBotSettings({ COMPLETION_MODEL: "pile" });
+      assertEqual(completionChance(state, city, state.deck.length, settings), 0,
+        "the city's only hole has no matching tile left");
+    });
+
+    test("pile model rates an easy city hole above a rare-tile hole", function () {
+      const rareState = pileCityState(true);
+      const easyState = easyPileHoleState();
+      const rareCity = allFeatures(rareState).filter(function (feature) {
+        return feature.kind === "city" && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 0;
+        });
+      })[0];
+      const easyCity = allFeatures(easyState).filter(function (feature) {
+        return feature.kind === "city" && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 0;
+        });
+      })[0];
+      const rareCache = createPileCompletionCache(rareState);
+      const easyCache = createPileCompletionCache(easyState);
+      assertEqual(rareCache.fittingCountAt(0, -1), 1, "only one rare E fits the rare hole");
+      assertEqual(easyCache.fittingCountAt(0, -1) > 1, true,
+        "many tile types fit the easy hole");
+      const settings = effectiveBotSettings({ COMPLETION_MODEL: "pile" });
+      const rareChance = completionChance(
+        rareState, rareCity, rareCache.tileCount, settings, rareCache
+      );
+      const easyChance = completionChance(
+        easyState, easyCity, easyCache.tileCount, settings, easyCache
+      );
+      assertEqual(easyChance > rareChance, true,
+        "an easy hole is more likely to be filled within the tile window");
+    });
+
+    test("pile model values blocking an opponent city when the held tile cuts off its hole", function () {
+      const state = blockingCityState();
+      const blocker = { x: 1, y: -1, rotation: 0, action: null };
+      const ordinary = { x: 2, y: 0, rotation: 1, action: null };
+      const beforeCache = createPileCompletionCache(state);
+      assertEqual(beforeCache.fittingCountAt(0, -1) > 1, true,
+        "several tiles remaining in the pile fit the opponent city's hole");
+      assertEqual(legalRotationsAt(state, "F", blocker.x, blocker.y).indexOf(blocker.rotation) >= 0,
+        true, "the held F can be placed next to the hole");
+      assertEqual(legalRotationsAt(state, "F", ordinary.x, ordinary.y).indexOf(ordinary.rotation) >= 0,
+        true, "an ordinary placement is also legal");
+
+      const report = {};
+      ["openSides", "pile"].forEach(function (model) {
+        const settings = { COMPLETION_MODEL: model };
+        const blocked = simulatedTurn(state, 0, blocker);
+        const blockedCity = allFeatures(blocked).filter(function (feature) {
+          return feature.kind === "city" && feature.nodes.some(function (node) {
+            return node.x === 0 && node.y === 0;
+          });
+        })[0];
+        const afterChance = completionChance(
+          blocked, blockedCity, blocked.deck.length, effectiveBotSettings(settings)
+        );
+        report[model] = {
+          blocker: blockingMoveParts(state, blocker, model),
+          ordinary: blockingMoveParts(state, ordinary, model),
+          chanceAfterBlocking: afterChance
+        };
+        setBotRandom(createSeededRandom("block-" + model));
+        report[model].picked = chooseMove(state, 0, "smart", settings);
+      });
+
+      assertEqual(report.openSides.chanceAfterBlocking > 0, true,
+        "openSides keeps its one-open-side estimate after the blocker");
+      assertEqual(report.pile.chanceAfterBlocking, 0,
+        "pile recognizes that no remaining tile fits after the blocker");
+      assertEqual(report.openSides.picked.x === blocker.x &&
+        report.openSides.picked.y === blocker.y, false,
+      "openSides picks an ordinary move");
+      assertEqual(report.pile.picked.x, blocker.x, "pile picks the blocking move");
+      assertEqual(report.pile.picked.y, blocker.y, "pile picks the blocking move");
+      return JSON.stringify(report);
     });
 
     test("smart bot avoids completing an opponent city when a neutral move exists", function () {
@@ -3078,7 +3312,7 @@
         }
 
         function createWorker(workerIndex) {
-          const worker = new Worker("./match-worker.js?v=41");
+          const worker = new Worker("./match-worker.js?v=42");
           workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -3210,6 +3444,9 @@
             farmPoints: seats.reduce(function (sum, seat) {
               return sum + result.farmPoints[seat];
             }, 0) / seats.length,
+            blockingMoves: seats.reduce(function (sum, seat) {
+              return sum + result.blockingMovesByPlayer[seat];
+            }, 0) / seats.length,
             noMeepleTurns: seats.reduce(function (sum, seat) {
               return sum + result.noMeepleTurnsByPlayer[seat];
             }, 0),
@@ -3315,6 +3552,7 @@
           averageMeeplesLeftInSupply: { A: 0, B: 0 },
           averageFarmersPlaced: { A: 0, B: 0 },
           averageFarmPoints: { A: 0, B: 0 },
+          averageBlockingMovesPerGame: { A: 0, B: 0 },
           shareTurnsWithoutMeeple: { A: 0, B: 0 }
         };
         const timingTotals = {
@@ -3322,8 +3560,8 @@
           B: { totalMs: 0, count: 0 }
         };
         const playTotals = {
-          A: { meeples: 0, farmers: 0, farmPoints: 0, noMeepleTurns: 0, turns: 0 },
-          B: { meeples: 0, farmers: 0, farmPoints: 0, noMeepleTurns: 0, turns: 0 }
+          A: { meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0, noMeepleTurns: 0, turns: 0 },
+          B: { meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0, noMeepleTurns: 0, turns: 0 }
         };
         let scoreATotal = 0;
         let scoreBTotal = 0;
@@ -3347,6 +3585,7 @@
             totals.meeples += stats.meeplesLeftInSupply;
             totals.farmers += stats.farmersPlaced;
             totals.farmPoints += stats.farmPoints;
+            totals.blockingMoves += stats.blockingMoves;
             totals.noMeepleTurns += stats.noMeepleTurns;
             totals.turns += stats.turns;
           });
@@ -3363,6 +3602,9 @@
             : 0;
           summary.averageFarmPoints[label] = gameIndexes.length
             ? playTotals[label].farmPoints / gameIndexes.length
+            : 0;
+          summary.averageBlockingMovesPerGame[label] = gameIndexes.length
+            ? playTotals[label].blockingMoves / gameIndexes.length
             : 0;
           summary.shareTurnsWithoutMeeple[label] = playTotals[label].turns
             ? playTotals[label].noMeepleTurns / playTotals[label].turns
@@ -3564,6 +3806,8 @@
       const settingsA = effectiveBotSettings({ FARMER_WEIGHT_START: 0.5 });
       const settingsB = effectiveBotSettings({});
       const classic = effectiveBotSettings(CLASSIC_SETTINGS);
+      assertEqual(settingsB.COMPLETION_MODEL, "pile", "new defaults use the pile completion model");
+      assertEqual(classic.COMPLETION_MODEL, "openSides", "classic preset keeps open-side completion");
       assertEqual(settingsA.FARMER_WEIGHT_START, 0.5, "A receives its farmer weight override");
       assertEqual(settingsB.FARMER_WEIGHT_START, 0.7, "B retains the default farmer weight");
       assertEqual(settingsB.MEEPLE_VALUE, 1.5, "B retains the default meeple value");
@@ -3768,6 +4012,7 @@
               averageMeeplesLeftInSupply: result.averageMeeplesLeftInSupply,
               averageFarmersPlaced: result.averageFarmersPlaced,
               averageFarmPoints: result.averageFarmPoints,
+              averageBlockingMovesPerGame: result.averageBlockingMovesPerGame,
               shareTurnsWithoutMeeple: result.shareTurnsWithoutMeeple
             };
           }

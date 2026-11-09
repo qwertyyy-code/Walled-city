@@ -13,7 +13,11 @@ const MONASTERY_COMPLETION_CHANCE = {
   floor: 0.3
 };
 const COMPLETION_TILE_WINDOW = 15;
-const CLASSIC_SETTINGS = { FARMER_WEIGHT_START: 0.3, MEEPLE_VALUE: 3 };
+const CLASSIC_SETTINGS = {
+  COMPLETION_MODEL: "openSides",
+  FARMER_WEIGHT_START: 0.3,
+  MEEPLE_VALUE: 3
+};
 const FARMER_WEIGHT = { early: 0.7, late: 1.0 };
 const FARMER_WEIGHT_TRANSITION_PROGRESS = 0.5;
 const MEEPLE_VALUE = 1.5;
@@ -24,7 +28,14 @@ let botRandom = Math.random;
 function effectiveBotSettings(settings) {
   const overrides = settings || {};
   const farmerWeightOverride = overrides.FARMER_WEIGHT || {};
+  const completionModel = overrides.COMPLETION_MODEL === undefined
+    ? "pile"
+    : overrides.COMPLETION_MODEL;
+  if (completionModel !== "openSides" && completionModel !== "pile") {
+    throw new Error("COMPLETION_MODEL must be \"openSides\" or \"pile\".");
+  }
   return {
+    COMPLETION_MODEL: completionModel,
     COMPLETION_CHANCE: Object.assign({}, COMPLETION_CHANCE, overrides.COMPLETION_CHANCE),
     MONASTERY_COMPLETION_CHANCE: Object.assign(
       {},
@@ -169,9 +180,115 @@ function monasteryEmptyNeighbors(game, feature) {
   return empty;
 }
 
-function completionChance(game, feature, tilesLeft, settings) {
-  const tileFactor = Math.min(1, tilesLeft / settings.COMPLETION_TILE_WINDOW);
+function featureOpenCells(game, feature) {
+  const cells = {};
+  let blocked = false;
+  feature.nodes.forEach(function (node) {
+    const spec = rotatedType(node.tile.typeId, node.tile.rot);
+    const groups = feature.kind === "city" ? spec.cities : spec.roads;
+    groups[node.index].edges.forEach(function (edge) {
+      const x = node.x + DIR_DELTA[edge].x;
+      const y = node.y + DIR_DELTA[edge].y;
+      const neighbor = boardTile(game, x, y);
+      if (!neighbor) {
+        cells[x + "," + y] = { x: x, y: y };
+        return;
+      }
+
+      const neighborSpec = rotatedType(neighbor.typeId, neighbor.rot);
+      const findIndex = feature.kind === "city" ? cityIndexOnEdge : roadIndexOnEdge;
+      if (findIndex(neighborSpec, OPPOSITE[edge]) < 0) blocked = true;
+    });
+  });
+  return { cells: Object.keys(cells).map(function (key) { return cells[key]; }), blocked: blocked };
+}
+
+function createPileCompletionCache(game) {
+  const tiles = game.deck.concat(game.riverDeck);
+  const tileCounts = {};
+  tiles.forEach(function (tile) {
+    tileCounts[tile.typeId] = (tileCounts[tile.typeId] || 0) + 1;
+  });
+  const rotatedEdgesByType = {};
+  Object.keys(tileCounts).forEach(function (typeId) {
+    const type = TILE_TYPES[typeId] || RIVER_TILE_TYPES[typeId];
+    rotatedEdgesByType[typeId] = [];
+    for (let rotation = 0; rotation < 4; rotation++) {
+      const edges = [null, null, null, null];
+      for (let edge = 0; edge < 4; edge++) {
+        edges[(edge + rotation) % 4] = type.edges[edge];
+      }
+      rotatedEdgesByType[typeId].push(edges);
+    }
+  });
+  const fittingCounts = {};
+
+  function fittingCountAt(x, y) {
+    const key = x + "," + y;
+    if (fittingCounts[key] !== undefined) return fittingCounts[key];
+    if (boardTile(game, x, y)) {
+      fittingCounts[key] = 0;
+      return 0;
+    }
+
+    const requiredEdges = [null, null, null, null];
+    let adjacent = 0;
+    for (let edge = 0; edge < 4; edge++) {
+      const neighbor = boardTile(
+        game,
+        x + DIR_DELTA[edge].x,
+        y + DIR_DELTA[edge].y
+      );
+      if (!neighbor) continue;
+      const neighborSpec = rotatedType(neighbor.typeId, neighbor.rot);
+      requiredEdges[edge] = neighborSpec.edges[OPPOSITE[edge]];
+      adjacent++;
+    }
+    if (!adjacent) {
+      fittingCounts[key] = 0;
+      return 0;
+    }
+
+    let count = 0;
+    Object.keys(tileCounts).forEach(function (typeId) {
+      const rotations = rotatedEdgesByType[typeId];
+      for (let rotation = 0; rotation < rotations.length; rotation++) {
+        const edges = rotations[rotation];
+        let matches = true;
+        for (let edge = 0; edge < 4; edge++) {
+          if (requiredEdges[edge] !== null && edges[edge] !== requiredEdges[edge]) {
+            matches = false;
+            break;
+          }
+        }
+        if (!matches) continue;
+        count += tileCounts[typeId];
+        break;
+      }
+    });
+    fittingCounts[key] = count;
+    return count;
+  }
+
+  return { tileCount: tiles.length, fittingCountAt: fittingCountAt };
+}
+
+function pileCellCompletionChance(fittingTiles, tilesLeft, tileWindow) {
+  if (fittingTiles <= 0 || tilesLeft <= 0) return 0;
+  const drawCount = Math.min(tilesLeft, Math.max(0, Math.floor(tileWindow)));
+  if (!drawCount) return 0;
+
+  let chanceNoFit = 1;
+  for (let draw = 0; draw < drawCount; draw++) {
+    if (draw >= tilesLeft - fittingTiles) return 1;
+    chanceNoFit *= (tilesLeft - fittingTiles - draw) / (tilesLeft - draw);
+  }
+  return 1 - chanceNoFit;
+}
+
+function completionChance(game, feature, tilesLeft, settings, pileCache) {
   if (feature.kind === "monastery") {
+    const tileFactor = Math.min(1, tilesLeft / settings.COMPLETION_TILE_WINDOW);
     const empty = monasteryEmptyNeighbors(game, feature);
     const chance = Math.max(
       settings.MONASTERY_COMPLETION_CHANCE.floor,
@@ -181,6 +298,21 @@ function completionChance(game, feature, tilesLeft, settings) {
     return chance * tileFactor;
   }
 
+  if (settings.COMPLETION_MODEL === "pile") {
+    const cache = pileCache || createPileCompletionCache(game);
+    const open = featureOpenCells(game, feature);
+    if (open.blocked || !open.cells.length) return 0;
+    return open.cells.reduce(function (chance, cell) {
+      const cellChance = pileCellCompletionChance(
+        cache.fittingCountAt(cell.x, cell.y),
+        cache.tileCount,
+        settings.COMPLETION_TILE_WINDOW
+      );
+      return chance * cellChance;
+    }, 1);
+  }
+
+  const tileFactor = Math.min(1, tilesLeft / settings.COMPLETION_TILE_WINDOW);
   const open = openFeatureSides(game, feature);
   const chance = open === 1
     ? settings.COMPLETION_CHANCE.oneOpenSide
@@ -242,6 +374,13 @@ function playerValues(game, tilesLeft, tilesAtStart, settings) {
   const originalScores = game.players.map(function (player) { return player.score; });
   if (!game.finalScored) scoreFarms(game);
   const weight = farmerWeight(tilesLeft, tilesAtStart, settings);
+  let completionCache = null;
+  function getCompletionCache() {
+    if (!completionCache && settings.COMPLETION_MODEL === "pile") {
+      completionCache = createPileCompletionCache(game);
+    }
+    return completionCache;
+  }
   const features = allFeatures(game).filter(function (feature) {
     return !featureComplete(game, feature);
   }).map(function (feature) {
@@ -250,7 +389,7 @@ function playerValues(game, tilesLeft, tilesAtStart, settings) {
     if (!highest) return null;
     const endValue = featurePoints(game, feature, false);
     const finishedValue = featurePoints(game, feature, true);
-    const chance = completionChance(game, feature, tilesLeft, settings);
+    const chance = completionChance(game, feature, tilesLeft, settings, getCompletionCache());
     return {
       counts: counts,
       highest: highest,
