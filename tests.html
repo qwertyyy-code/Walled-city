@@ -19,8 +19,8 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js?v=44"></script>
-  <script src="bot.js?v=44"></script>
+  <script src="game.js?v=46"></script>
+  <script src="bot.js?v=46"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -1918,6 +1918,288 @@
       assertEqual(!!state.riverEnabled, false, "River is disabled");
     });
 
+    test("normal seeded game 67 keeps its existing 10-tile result", function () {
+      const random = createSeededRandom(67);
+      const previousRandom = botRandom;
+      try {
+        setBotRandom(random);
+        const players = PLAYER_COLORS.slice(0, 2).map(function (player) {
+          return { name: player.name, color: player.hex, computer: true };
+        });
+        const state = newGame(players, 10, false, random, true);
+        Object.defineProperty(state, "_botSimulation", { value: true });
+        let turns = 0;
+        while (!state.gameOver && turns < 30) {
+          beginTurn(state);
+          if (state.gameOver) break;
+          const move = chooseMove(state, state.current, "smart");
+          assertEqual(!!move, true, "seed 67 has a legal move");
+          for (let i = 0; i < (move.rotation - state.currentTile.rot + 4) % 4; i++) {
+            rotateCurrent(state, 1);
+          }
+          assertEqual(selectPending(state, move.x, move.y), true, "place seed 67 tile");
+          if (move.action) {
+            assertEqual(selectPendingMeeple(
+              state,
+              move.action.spot.kind,
+              move.action.spot.index
+            ), true, "place seed 67 meeple");
+          }
+          assertEqual(confirmPending(state, false), true, "confirm seed 67 turn");
+          turns += 1;
+        }
+        assertEqual(JSON.stringify(state.players.map(function (player) {
+          return player.score;
+        })), "[18,18]", "final scores");
+        assertEqual(turns, 10, "turn count");
+        assertEqual(Object.keys(state.board).length, 11, "board tile count");
+      } finally {
+        setBotRandom(previousRandom);
+      }
+    });
+
+    test("double-game midpoint does not score unfinished features or farms", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], 1, false, createSeededRandom(67), true, true);
+      Object.defineProperty(state, "_botSimulation", { value: true });
+      state.players[0].score = 5;
+      state.players[0].meeples = 6;
+      state.players[1].meeples = 6;
+      state.board["0,0"].meeple = meeple(0, "city", 0);
+      put(state, 0, 1, "B", 0, meeple(1, "field", 0));
+      state.board["0,1"].doubleHalf = 1;
+      state.deck = [{ uid: "last-first-half", typeId: "B" }];
+      state.riverDeck = [];
+      state.current = 0;
+      state.phase = "handoff";
+      const before = {
+        scores: state.players.map(function (player) { return player.score; }),
+        endGamePoints: state.players.map(function (player) {
+          return JSON.stringify(player.endGamePoints);
+        }),
+        meeples: state.players.map(function (player) { return player.meeples; }),
+        occupants: [state.board["0,0"].meeple, state.board["0,1"].meeple]
+          .map(function (occupant) { return JSON.stringify(occupant); })
+      };
+
+      beginTurn(state);
+      const cell = legalCells(state, state.currentTile.typeId)[0];
+      assertEqual(selectPending(state, cell.x, cell.y), true, "place last first-half tile");
+      assertEqual(confirmPending(state), true, "confirm last first-half tile");
+
+      assertEqual(state.gameOver, false, "midpoint is not game over");
+      assertEqual(state.finalScored, false, "midpoint has not final-scored");
+      assertEqual(state.doublePhase, "spring", "second spring is next");
+      assertEqual(JSON.stringify(state.players.map(function (player) {
+        return player.score;
+      })), JSON.stringify(before.scores), "scores are unchanged");
+      assertEqual(JSON.stringify(state.players.map(function (player) {
+        return JSON.stringify(player.endGamePoints);
+      })), JSON.stringify(before.endGamePoints), "end-game scores are unchanged");
+      assertEqual(JSON.stringify(state.players.map(function (player) {
+        return player.meeples;
+      })), JSON.stringify(before.meeples), "meeple supplies are unchanged");
+      assertEqual(JSON.stringify([state.board["0,0"].meeple, state.board["0,1"].meeple]
+        .map(function (occupant) { return JSON.stringify(occupant); })),
+      JSON.stringify(before.occupants), "unfinished feature meeples and farmer remain");
+    });
+
+    test("second spring rejects unsafe spots and accepts a valid spring with a meeple", function () {
+      function springState() {
+        const state = testState();
+        state.doubleGame = true;
+        state.doublePhase = "spring";
+        state.secondSpringMode = "preferred";
+        state.deck = [];
+        state.currentTile = { uid: "second-spring", typeId: RIVER_SPRING_ID, rot: 0 };
+        state.phase = "place";
+        put(state, 0, 0, "D", 0);
+        state.board["0,0"].start = true;
+        return state;
+      }
+
+      const intoBoard = springState();
+      assertEqual(canPlaceAt(intoBoard, RIVER_SPRING_ID, 2, 0, 1), false,
+        "spring river side cannot point into the board");
+
+      const touchingBoard = springState();
+      put(touchingBoard, 1, 2, "B", 0);
+      assertEqual(canPlaceAt(touchingBoard, RIVER_SPRING_ID, 0, 0, 1), false,
+        "strict spring river cell cannot touch another first-board tile");
+
+      const mismatched = springState();
+      assertEqual(legalRotationsAt(mismatched, RIVER_SPRING_ID, 0, -1).length, 0,
+        "spring edges must match");
+
+      const valid = springState();
+      valid.futureRiverDeck = [{ uid: "second-lake", typeId: RIVER_LAKE_ID }];
+      valid.futureBaseDeck = [{ uid: "second-base", typeId: "B" }];
+      assertEqual(canPlaceAt(valid, RIVER_SPRING_ID, 0, 0, 1), true,
+        "valid spring spot is legal");
+      assertEqual(selectPending(valid, 0, 1), true, "select valid spring");
+      assertEqual(selectPendingMeeple(valid, "field", 0), true,
+        "spring allows a meeple");
+      assertEqual(confirmPending(valid), true, "confirm spring placement");
+      assertEqual(valid.board["0,1"].doubleRiver, true, "spring starts second river");
+      assertEqual(valid.board["0,1"].meeple.kind, "field", "spring meeple is placed");
+      assertEqual(valid.doublePhase, "secondRiver", "second river phase starts");
+      assertEqual(undoLast(valid), true, "undo spring placement");
+      assertEqual(valid.doublePhase, "spring", "undo restores the waiting-for-spring phase");
+      assertEqual(valid.futureRiverDeck.length, 1, "undo restores the future river pile");
+      assertEqual(valid.riverDeck.length, 0, "undo removes the active second river pile");
+    });
+
+    test("a city and a farm can span both halves and score normally", function () {
+      const state = testState();
+      state.doubleGame = true;
+      state.doublePhase = "second";
+      state.current = 0;
+      state.phase = "handoff";
+      state.deck = [
+        { uid: "second-city-cap", typeId: "E" },
+        { uid: "second-farm-tile", typeId: "B" }
+      ];
+      put(state, 0, 0, "D", 0, meeple(0, "city", 0));
+      state.board["0,0"].start = true;
+      state.board["0,0"].doubleHalf = 1;
+      put(state, 1, 0, "A", 1, meeple(1, "field", 0));
+      state.board["1,0"].doubleHalf = 1;
+      state.players[0].meeples = 6;
+      state.players[1].meeples = 6;
+
+      playTurn(state, 0, -1, 2, null, 0);
+      assertEqual(state.players[0].score, 2, "first-half city scores when closed in half two");
+      assertEqual(state.gameOver, false, "city scores before the final pile");
+      playTurn(state, 0, 1, 0, null, 0);
+      assertEqual(state.gameOver, true, "second base pile ends the game");
+      assertEqual(state.players[1].endGamePoints.farms, FARM_POINTS_PER_CITY,
+        "farmer on first-half field scores the completed city");
+      const spanningFarm = allFieldFeatures(state).filter(function (feature) {
+        return feature.kind === "field" && feature.nodes.some(function (node) {
+          return node.x === 1 && node.y === 0;
+        }) && feature.nodes.some(function (node) {
+          return node.x === 0 && node.y === 1;
+        });
+      })[0];
+      assertEqual(!!spanningFarm, true, "farm joins first- and second-half tiles");
+    });
+
+    test("double-game saves reload in all four phases", function () {
+      const previousSave = localStorage.getItem(SAVE_KEY);
+      const players = [
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ];
+      const phases = ["first", "spring", "secondRiver", "second"];
+      const resumedTypes = ["B", RIVER_SPRING_ID, RIVER_LAKE_ID, "B"];
+      try {
+        phases.forEach(function (doublePhase, index) {
+          const state = newGame(
+            players,
+            2,
+            false,
+            createSeededRandom(860 + index),
+            false,
+            true
+          );
+          state.doublePhase = doublePhase;
+          state.phase = "handoff";
+          state.currentTile = null;
+          state.deck = doublePhase === "first"
+            ? [{ uid: "first-save", typeId: "B" }]
+            : [];
+          if (doublePhase === "spring") {
+            state.futureRiverDeck = [{ uid: "saved-lake", typeId: RIVER_LAKE_ID }];
+          } else if (doublePhase === "secondRiver") {
+            state.board["0,1"] = {
+              uid: "saved-spring",
+              typeId: RIVER_SPRING_ID,
+              rot: 0,
+              meeple: null,
+              start: false,
+              doubleHalf: 2,
+              doubleRiver: true
+            };
+            state.riverOpenEnd = { x: 0, y: 2, incomingEdge: N };
+            state.riverDeck = [{ uid: "saved-lake", typeId: RIVER_LAKE_ID }];
+            state.futureRiverDeck = [];
+            state.futureBaseDeck = [{ uid: "saved-base", typeId: "B" }];
+          } else if (doublePhase === "second") {
+            state.deck = [{ uid: "saved-base", typeId: "B" }];
+            state.futureRiverDeck = [];
+            state.futureBaseDeck = [];
+          }
+          const expected = JSON.stringify({
+            phase: state.phase,
+            doublePhase: state.doublePhase,
+            current: state.current,
+            currentTile: state.currentTile,
+            deck: state.deck,
+            riverDeck: state.riverDeck,
+            futureRiverDeck: state.futureRiverDeck,
+            futureBaseDeck: state.futureBaseDeck,
+            board: state.board
+          });
+          saveForHome(state);
+          const resumed = loadSave();
+          assertEqual(!!resumed, true, doublePhase + " save loads");
+          assertEqual(JSON.stringify({
+            phase: resumed.phase,
+            doublePhase: resumed.doublePhase,
+            current: resumed.current,
+            currentTile: resumed.currentTile,
+            deck: resumed.deck,
+            riverDeck: resumed.riverDeck,
+            futureRiverDeck: resumed.futureRiverDeck,
+            futureBaseDeck: resumed.futureBaseDeck,
+            board: resumed.board
+          }), expected, doublePhase + " state is preserved");
+          beginTurn(resumed);
+          assertEqual(resumed.currentTile.typeId, resumedTypes[index],
+            doublePhase + " resumes with the correct next tile");
+        });
+      } finally {
+        if (previousSave === null) clearSave();
+        else localStorage.setItem(SAVE_KEY, previousSave);
+      }
+    });
+
+    test("bot remaining-tile count includes both future second-half sets", function () {
+      const state = newGame([
+        { name: "Red", color: "#c62828" },
+        { name: "Blue", color: "#1565c0" }
+      ], undefined, false, createSeededRandom(67), true, true);
+      Object.defineProperty(state, "_botSimulation", { value: true });
+      state.deck = [{ uid: "last-first-half", typeId: "B" }];
+      state.riverDeck = [];
+      beginTurn(state);
+      assertEqual(countTilesAtStart(state), 85, "first pile plus the complete second half");
+      const candidate = generateMoveCandidates(state, 0, null, false)[0];
+      assertEqual(!!candidate, true, "bot has a first-half candidate");
+      const simulated = simulatedTurn(state, 0, candidate);
+      assertEqual(simulated.doublePhase, "spring", "simulated last turn reaches midpoint");
+      assertEqual(countTilesLeft(simulated), 84,
+        "tiles left includes the spring, second river and full 72-tile base set");
+    });
+
+    testAsync("200 seeded double games keep the second river off the first board", async function () {
+      const jobs = Array.from({ length: 200 }, function (_, index) {
+        return {
+          seed: index + 1,
+          riverEnabled: index % 2 === 0,
+          doubleGame: true,
+          settingsByPlayer: [{}, {}]
+        };
+      });
+      const results = await runWorkerGames(jobs);
+      const failures = listFailedGames(jobs, results);
+      assertEqual(failures.length, 0, "all games finish with valid rivers: " +
+        JSON.stringify(failures.slice(0, 5)));
+      return "200 seeds, no placement or board-validation errors";
+    });
+
     test("river tile placement away from the open end is refused", function () {
       const state = riverGame(["river-straight", "river-lake"], ["B"]);
       beginTurn(state);
@@ -3387,7 +3669,7 @@
         }
 
         function createWorker(workerIndex) {
-          const worker = new Worker("./match-worker.js?v=44");
+          const worker = new Worker("./match-worker.js?v=46");
           workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -4227,6 +4509,74 @@
           riverOn: section(comparison.byRiver.on),
           riverOff: section(comparison.byRiver.off),
           durationMs: comparison.durationMs
+        });
+      });
+    }
+
+    if (new URLSearchParams(window.location.search).get("reports") === "step67") {
+      await testAsync("report-only 100 double games on seeds 801–900", async function () {
+        const jobs = Array.from({ length: 100 }, function (_, index) {
+          return {
+            seed: index + 801,
+            riverEnabled: false,
+            doubleGame: true,
+            settingsByPlayer: [{}, {}]
+          };
+        });
+        const results = await runWorkerGames(jobs);
+        const failures = listFailedGames(jobs, results);
+        assertEqual(failures.length, 0, "all report games complete: " +
+          JSON.stringify(failures));
+        let scoreTotal = 0;
+        let turnTotal = 0;
+        let moveTotalMs = 0;
+        let moveCount = 0;
+        let slowestMoveMs = 0;
+        let fallbackGames = 0;
+        let fallbackTotal = 0;
+        let skipGames = 0;
+        let skipTotal = 0;
+        let gamesWithRiverDiscards = 0;
+        let discardedRiverTiles = 0;
+        let firstHalfMeeples = 0;
+        let secondHalfMeeples = 0;
+        results.forEach(function (result) {
+          result.scores.forEach(function (score) { scoreTotal += score; });
+          turnTotal += result.turns;
+          result.moveTimes.forEach(function (timing) {
+            moveTotalMs += timing.totalMs;
+            moveCount += timing.count;
+            slowestMoveMs = Math.max(slowestMoveMs, timing.slowestMs);
+          });
+          fallbackTotal += result.secondRiverFallbackCount;
+          if (result.secondRiverFallbackCount) fallbackGames += 1;
+          skipTotal += result.secondRiverSkipCount;
+          if (result.secondRiverSkipCount) skipGames += 1;
+          discardedRiverTiles += result.secondRiverDiscardCount;
+          if (result.secondRiverDiscardCount) gamesWithRiverDiscards += 1;
+          result.meeplesAtFirstHalfEnd.forEach(function (count) {
+            firstHalfMeeples += count;
+          });
+          result.meeplesAtSecondHalfEnd.forEach(function (count) {
+            secondHalfMeeples += count;
+          });
+        });
+        return JSON.stringify({
+          games: results.length,
+          seeds: "801–900",
+          errors: failures.length,
+          averageScorePerPlayer: scoreTotal / (results.length * 2),
+          averageTurnsPerGame: turnTotal / results.length,
+          springFallbackGames: fallbackGames,
+          springFallbackCount: fallbackTotal,
+          springSkipGames: skipGames,
+          springSkipCount: skipTotal,
+          gamesThrowingAwaySecondRiverTiles: gamesWithRiverDiscards,
+          secondRiverTilesDiscarded: discardedRiverTiles,
+          averageMeeplesInSupplyAtFirstHalfEnd: firstHalfMeeples / (results.length * 2),
+          averageMeeplesInSupplyAtSecondHalfEnd: secondHalfMeeples / (results.length * 2),
+          averageMoveMs: moveTotalMs / moveCount,
+          slowestMoveMs: slowestMoveMs
         });
       });
     }

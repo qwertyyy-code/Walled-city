@@ -208,7 +208,7 @@ function featureOpenCells(game, feature) {
 }
 
 function createPileCompletionCache(game) {
-  const tiles = game.deck.concat(game.riverDeck);
+  const tiles = game.deck.concat(game.riverDeck, futureDoubleTiles(game));
   const tileCounts = {};
   tiles.forEach(function (tile) {
     tileCounts[tile.typeId] = (tileCounts[tile.typeId] || 0) + 1;
@@ -330,8 +330,28 @@ function countTilesAtStart(game) {
   const placed = Object.keys(game.board).filter(function (key) {
     return !game.board[key].start;
   }).length;
-  return game.deck.length + game.riverDeck.length + game.discarded.length +
+  return countTilesLeft(game) + game.discarded.length +
+    (game.secondRiverSkippedTileCount || 0) +
     placed + (game.currentTile ? 1 : 0);
+}
+
+function futureDoubleTiles(game) {
+  if (!game.doubleGame) return [];
+  if (game.doublePhase === "first" || game.doublePhase === "spring") {
+    const future = (game.futureRiverDeck || []).concat(game.futureBaseDeck || []);
+    if (game.doublePhase === "first" ||
+      !(game.currentTile && game.currentTile.typeId === RIVER_SPRING_ID)) {
+      future.push({ typeId: RIVER_SPRING_ID });
+    }
+    return future;
+  }
+  return game.doublePhase === "secondRiver"
+    ? (game.futureBaseDeck || [])
+    : [];
+}
+
+function countTilesLeft(game) {
+  return game.deck.length + game.riverDeck.length + futureDoubleTiles(game).length;
 }
 
 function farmerWeight(tilesLeft, tilesAtStart, settings) {
@@ -426,7 +446,7 @@ function playerValues(game, tilesLeft, tilesAtStart, settings) {
 
 function scoreMove(game, playerIndex, move, tilesAtStart, settings) {
   const simulated = simulatedTurn(game, playerIndex, move);
-  const tilesLeft = simulated.deck.length + simulated.riverDeck.length;
+  const tilesLeft = countTilesLeft(simulated);
   const values = playerValues(simulated, tilesLeft, tilesAtStart, settings);
   const opponents = values.filter(function (_, index) { return index !== playerIndex; });
   return values[playerIndex] - Math.max.apply(null, opponents.concat([0]));

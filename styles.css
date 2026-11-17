@@ -55,6 +55,18 @@ button, input { font: inherit; }
   line-height: 1.4;
 }
 
+.double-banner {
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: #fff7e6;
+  color: var(--accent);
+  font-weight: 700;
+  text-align: center;
+}
+
+.double-banner[hidden] { display: none; }
+
 .stack {
   padding: 12px 22px 24px;
   display: flex;

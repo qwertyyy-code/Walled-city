@@ -41,6 +41,16 @@ function emptyState() {
     riverDeck: [],
     riverOpenEnd: null,
     riverLastTurn: null,
+    doubleGame: false,
+    doublePhase: null,
+    doubleBaseTileLimit: null,
+    futureRiverDeck: [],
+    futureBaseDeck: [],
+    secondSpringMode: null,
+    secondRiverFallbackCount: 0,
+    secondRiverSkipCount: 0,
+    secondRiverSkippedTileCount: 0,
+    secondRiverDiscardCount: 0,
     discarded: [],
     board: {},
     lastPlaced: [],
@@ -82,7 +92,21 @@ function buildPlayerSetup(computerMode, humanCount, computerOpponentCount, names
   return players;
 }
 
-function newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave) {
+function makeDoubleBaseDeck(tileLimit, rng) {
+  const deck = [];
+  Object.keys(TILE_TYPES).forEach(function (typeId) {
+    for (let index = 0; index < TILE_TYPES[typeId].count; index++) {
+      deck.push({ uid: "double-" + typeId + "-" + index, typeId: typeId });
+    }
+  });
+  fisherYates(deck, rng);
+  if (Number.isInteger(tileLimit) && tileLimit >= 0) {
+    deck.length = Math.min(deck.length, tileLimit);
+  }
+  return deck;
+}
+
+function newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave, doubleGame) {
   const withRiver = !!riverEnabled;
   const pack = makeDeck(tileLimit, withRiver, rng);
   const state = emptyState();
@@ -100,6 +124,11 @@ function newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave) {
   state.lastPlaced = state.players.map(function () { return null; });
   state.deck = pack.deck;
   state.riverEnabled = withRiver;
+  state.doubleGame = !!doubleGame;
+  state.doublePhase = state.doubleGame ? "first" : null;
+  state.doubleBaseTileLimit = Number.isInteger(tileLimit) && tileLimit >= 0
+    ? tileLimit
+    : null;
   if (withRiver) {
     state.riverDeck = makeRiverDeck(rng);
     state.riverOpenEnd = { x: 0, y: 1, incomingEdge: N };
@@ -118,6 +147,10 @@ function newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave) {
       meeple: null,
       start: true
     };
+  }
+  if (state.doubleGame) {
+    state.futureRiverDeck = makeRiverDeck(rng);
+    state.futureBaseDeck = makeDoubleBaseDeck(state.doubleBaseTileLimit, rng);
   }
   state.phase = "handoff";
   state.current = 0;
@@ -146,9 +179,17 @@ function saveForHome(state) {
   persist(state);
 }
 
-function createNewGameIfConfirmed(playerSetup, tileLimit, riverEnabled, rng, replaceSavedGame, suppressSave) {
+function createNewGameIfConfirmed(
+  playerSetup,
+  tileLimit,
+  riverEnabled,
+  rng,
+  replaceSavedGame,
+  suppressSave,
+  doubleGame
+) {
   if (loadSave() && !replaceSavedGame && !suppressSave) return null;
-  return newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave);
+  return newGame(playerSetup, tileLimit, riverEnabled, rng, suppressSave, doubleGame);
 }
 
 function loadSave() {
@@ -186,6 +227,17 @@ function loadSave() {
       player.computer = !!player.computer;
     });
     state.finalScored = !!state.finalScored;
+    state.doubleGame = !!state.doubleGame;
+    state.doublePhase = state.doubleGame
+      ? (state.doublePhase || "first")
+      : null;
+    if (!Array.isArray(state.futureRiverDeck)) state.futureRiverDeck = [];
+    if (!Array.isArray(state.futureBaseDeck)) state.futureBaseDeck = [];
+    state.secondSpringMode = state.secondSpringMode || null;
+    state.secondRiverFallbackCount = Number(state.secondRiverFallbackCount) || 0;
+    state.secondRiverSkipCount = Number(state.secondRiverSkipCount) || 0;
+    state.secondRiverSkippedTileCount = Number(state.secondRiverSkippedTileCount) || 0;
+    state.secondRiverDiscardCount = Number(state.secondRiverDiscardCount) || 0;
     return state;
   } catch (err) {
     return null;
@@ -236,6 +288,10 @@ function neighborKeys(state) {
 
 function canPlaceAt(state, typeId, rot, x, y) {
   if (boardTile(state, x, y)) return false;
+  if (typeId === RIVER_SPRING_ID && state.doubleGame &&
+    state.doublePhase === "spring") {
+    return canPlaceSecondSpringAt(state, rot, x, y);
+  }
   if (RIVER_TILE_TYPES[typeId]) {
     return canPlaceRiverAt(state, typeId, rot, x, y);
   }
@@ -292,8 +348,82 @@ function canPlaceRiverAt(state, typeId, rot, x, y) {
     const nextX = x + DIR_DELTA[outgoingEdge].x;
     const nextY = y + DIR_DELTA[outgoingEdge].y;
     if (boardTile(state, nextX, nextY)) return false;
+    if (state.doubleGame &&
+      (state.doublePhase === "secondRiver" || state._validatingSecondRiver)) {
+      for (let edge = 0; edge < 4; edge++) {
+        const neighbor = boardTile(state, x + DIR_DELTA[edge].x, y + DIR_DELTA[edge].y);
+        if (neighbor && !neighbor.doubleRiver) return false;
+        const targetNeighbor = boardTile(
+          state,
+          nextX + DIR_DELTA[edge].x,
+          nextY + DIR_DELTA[edge].y
+        );
+        if (targetNeighbor && !targetNeighbor.doubleRiver) return false;
+      }
+    }
+  } else if (state.doubleGame &&
+    (state.doublePhase === "secondRiver" || state._validatingSecondRiver)) {
+    for (let edge = 0; edge < 4; edge++) {
+      const neighbor = boardTile(state, x + DIR_DELTA[edge].x, y + DIR_DELTA[edge].y);
+      if (neighbor && !neighbor.doubleRiver) return false;
+    }
   }
   return canPlaceMatchingEdges(state, typeId, rot, x, y);
+}
+
+function canPlaceSecondSpringAt(state, rot, x, y) {
+  if (!canPlaceMatchingEdges(state, RIVER_SPRING_ID, rot, x, y)) return false;
+  const spec = rotatedType(RIVER_SPRING_ID, rot);
+  const riverEdge = spec.edges.indexOf(RIVER);
+  if (riverEdge < 0 || spec.edges.lastIndexOf(RIVER) !== riverEdge) return false;
+  const nextX = x + DIR_DELTA[riverEdge].x;
+  const nextY = y + DIR_DELTA[riverEdge].y;
+  if (boardTile(state, nextX, nextY)) return false;
+  if (state.secondSpringMode === "fallback") return true;
+  for (let edge = 0; edge < 4; edge++) {
+    if (edge === OPPOSITE[riverEdge]) continue;
+    if (boardTile(state, nextX + DIR_DELTA[edge].x, nextY + DIR_DELTA[edge].y)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function secondSpringCandidates(state, preferredOnly) {
+  const candidates = [];
+  neighborKeys(state).forEach(function (cell) {
+    for (let rot = 0; rot < 4; rot++) {
+      const previousMode = state.secondSpringMode;
+      state.secondSpringMode = preferredOnly ? "preferred" : "fallback";
+      const legal = canPlaceSecondSpringAt(state, rot, cell.x, cell.y);
+      state.secondSpringMode = previousMode;
+      if (legal) candidates.push({ x: cell.x, y: cell.y, rotation: rot });
+    }
+  });
+  return candidates;
+}
+
+function prepareSecondSpring(state) {
+  const preferred = secondSpringCandidates(state, true);
+  if (preferred.length) {
+    state.secondSpringMode = "preferred";
+    state.currentTile = { uid: "double-river-spring", typeId: RIVER_SPRING_ID, rot: 0 };
+    return true;
+  }
+  if (secondSpringCandidates(state, false).length) {
+    state.secondSpringMode = "fallback";
+    state.secondRiverFallbackCount += 1;
+    state.currentTile = { uid: "double-river-spring", typeId: RIVER_SPRING_ID, rot: 0 };
+    return true;
+  }
+  state.secondSpringMode = null;
+  state.secondRiverSkipCount += 1;
+  state.secondRiverSkippedTileCount += state.futureRiverDeck.length + 1;
+  state.futureRiverDeck = [];
+  state.doublePhase = "second";
+  state.deck = state.futureBaseDeck;
+  state.futureBaseDeck = [];
+  return false;
 }
 
 function validateBoard(state) {
@@ -343,7 +473,8 @@ function validateBoard(state) {
   const riverState = Object.assign({}, state, { board: Object.assign({}, state.board) });
   Object.keys(riverState.board).forEach(function (key) {
     const tile = riverState.board[key];
-    if (RIVER_TILE_TYPES[tile.typeId] && tile.typeId !== RIVER_SPRING_ID) {
+    if (key !== keyXY(0, 0) || tile.typeId !== RIVER_SPRING_ID ||
+      tile.doubleRiver) {
       delete riverState.board[key];
     }
   });
@@ -352,7 +483,8 @@ function validateBoard(state) {
     riverState.riverLastTurn = null;
     let remaining = Object.keys(state.board).filter(function (key) {
       const tile = state.board[key];
-      return RIVER_TILE_TYPES[tile.typeId] && tile.typeId !== RIVER_SPRING_ID;
+      return RIVER_TILE_TYPES[tile.typeId] && tile.typeId !== RIVER_SPRING_ID &&
+        !tile.doubleRiver;
     }).length;
     while (remaining > 0 && riverState.riverOpenEnd) {
       const open = riverState.riverOpenEnd;
@@ -370,9 +502,61 @@ function validateBoard(state) {
     if (remaining > 0) {
       Object.keys(state.board).forEach(function (key) {
         const tile = state.board[key];
-        if (!RIVER_TILE_TYPES[tile.typeId] || tile.typeId === RIVER_SPRING_ID) return;
+        if (!RIVER_TILE_TYPES[tile.typeId] || tile.typeId === RIVER_SPRING_ID ||
+          tile.doubleRiver) return;
         if (riverState.board[key]) return;
         const coords = key.split(",").map(Number);
+        illegalTiles.push({ x: coords[0], y: coords[1], typeId: tile.typeId, rot: tile.rot });
+      });
+    }
+  }
+  const secondSpringKey = Object.keys(state.board).filter(function (key) {
+    const tile = state.board[key];
+    return tile.typeId === RIVER_SPRING_ID && tile.doubleRiver;
+  })[0];
+  if (secondSpringKey) {
+    const secondRiverState = Object.assign({}, state, {
+      board: Object.assign({}, state.board),
+      _validatingSecondRiver: true
+    });
+    const secondRiverTiles = Object.keys(state.board).filter(function (key) {
+      return state.board[key].doubleRiver;
+    });
+    Object.keys(secondRiverState.board).forEach(function (key) {
+      const tile = secondRiverState.board[key];
+      if (tile.doubleRiver || tile.doubleHalf === 2) {
+        delete secondRiverState.board[key];
+      }
+    });
+    const spring = state.board[secondSpringKey];
+    secondRiverState.board[secondSpringKey] = spring;
+    const springCoords = secondSpringKey.split(",").map(Number);
+    const springRiverEdge = rotatedType(spring.typeId, spring.rot).edges.indexOf(RIVER);
+    secondRiverState.riverOpenEnd = {
+      x: springCoords[0] + DIR_DELTA[springRiverEdge].x,
+      y: springCoords[1] + DIR_DELTA[springRiverEdge].y,
+      incomingEdge: OPPOSITE[springRiverEdge]
+    };
+    secondRiverState.riverLastTurn = null;
+    let remaining = secondRiverTiles.length - 1;
+    while (remaining > 0 && secondRiverState.riverOpenEnd) {
+      const open = secondRiverState.riverOpenEnd;
+      const key = keyXY(open.x, open.y);
+      const tile = state.board[key];
+      if (!tile || !tile.doubleRiver || tile.typeId === RIVER_SPRING_ID) break;
+      const rotations = legalRotationsAt(secondRiverState, tile.typeId, open.x, open.y);
+      if (rotations.indexOf(tile.rot) < 0 && !edgeMismatchTiles[key]) {
+        illegalTiles.push({ x: open.x, y: open.y, typeId: tile.typeId, rot: tile.rot });
+      }
+      secondRiverState.board[key] = tile;
+      advanceRiver(secondRiverState, tile.typeId, tile.rot, open.x, open.y);
+      remaining--;
+    }
+    if (remaining > 0) {
+      secondRiverTiles.forEach(function (key) {
+        if (key === secondSpringKey || secondRiverState.board[key]) return;
+        const coords = key.split(",").map(Number);
+        const tile = state.board[key];
         illegalTiles.push({ x: coords[0], y: coords[1], typeId: tile.typeId, rot: tile.rot });
       });
     }
@@ -403,6 +587,9 @@ function anyLegalRotation(state, typeId) {
 function snapshot(state) {
   return clone({
     board: state.board,
+    deck: state.deck,
+    riverDeck: state.riverDeck,
+    discarded: state.discarded,
     lastPlaced: state.lastPlaced,
     players: state.players,
     current: state.current,
@@ -412,6 +599,16 @@ function snapshot(state) {
     placed: state.placed,
     riverOpenEnd: state.riverOpenEnd,
     riverLastTurn: state.riverLastTurn,
+    doubleGame: state.doubleGame,
+    doublePhase: state.doublePhase,
+    doubleBaseTileLimit: state.doubleBaseTileLimit,
+    futureRiverDeck: state.futureRiverDeck,
+    futureBaseDeck: state.futureBaseDeck,
+    secondSpringMode: state.secondSpringMode,
+    secondRiverFallbackCount: state.secondRiverFallbackCount,
+    secondRiverSkipCount: state.secondRiverSkipCount,
+    secondRiverSkippedTileCount: state.secondRiverSkippedTileCount,
+    secondRiverDiscardCount: state.secondRiverDiscardCount,
     phase: state.phase,
     meeplePicked: state.meeplePicked,
     scoreLog: state.scoreLog,
@@ -423,6 +620,9 @@ function snapshot(state) {
 
 function restoreSnap(state, snap) {
   state.board = snap.board;
+  state.deck = snap.deck || state.deck;
+  state.riverDeck = snap.riverDeck || state.riverDeck;
+  state.discarded = snap.discarded || state.discarded;
   state.players = snap.players;
   state.lastPlaced = state.players.map(function (_, index) {
     return Array.isArray(snap.lastPlaced) ? snap.lastPlaced[index] || null : null;
@@ -434,6 +634,16 @@ function restoreSnap(state, snap) {
   state.placed = snap.placed;
   state.riverOpenEnd = snap.riverOpenEnd;
   state.riverLastTurn = snap.riverLastTurn;
+  state.doubleGame = !!snap.doubleGame;
+  state.doublePhase = snap.doublePhase || null;
+  state.doubleBaseTileLimit = snap.doubleBaseTileLimit;
+  state.futureRiverDeck = snap.futureRiverDeck || [];
+  state.futureBaseDeck = snap.futureBaseDeck || [];
+  state.secondSpringMode = snap.secondSpringMode || null;
+  state.secondRiverFallbackCount = snap.secondRiverFallbackCount || 0;
+  state.secondRiverSkipCount = snap.secondRiverSkipCount || 0;
+  state.secondRiverSkippedTileCount = snap.secondRiverSkippedTileCount || 0;
+  state.secondRiverDiscardCount = snap.secondRiverDiscardCount || 0;
   state.phase = snap.phase;
   state.meeplePicked = snap.meeplePicked;
   state.scoreLog = snap.scoreLog || [];
@@ -444,6 +654,20 @@ function restoreSnap(state, snap) {
 
 function drawPlaceable(state) {
   while (true) {
+    if (state.doubleGame && state.doublePhase === "first" &&
+      !state.riverOpenEnd && !state.deck.length) {
+      state.doublePhase = "spring";
+    }
+    if (state.doubleGame && state.doublePhase === "spring") {
+      if (prepareSecondSpring(state)) return true;
+      continue;
+    }
+    if (state.doubleGame && state.doublePhase === "secondRiver" &&
+      !state.riverOpenEnd) {
+      state.doublePhase = "second";
+      state.deck = state.futureBaseDeck;
+      state.futureBaseDeck = [];
+    }
     let tile;
     if (state.riverOpenEnd) {
       if (state.riverDeck.length) {
@@ -466,6 +690,9 @@ function drawPlaceable(state) {
       return true;
     }
     state.discarded.push(tile);
+    if (state.doubleGame && state.doublePhase === "secondRiver") {
+      state.secondRiverDiscardCount += 1;
+    }
     if (tile.typeId === RIVER_LAKE_ID) {
       state.riverOpenEnd = null;
       state.riverLastTurn = null;
@@ -563,14 +790,35 @@ function lockPending(state) {
   const tile = state.currentTile;
   if (legalRotationsAt(state, tile.typeId, x, y).indexOf(tile.rot) < 0) return false;
   state.undo = snapshot(state);
-  state.board[keyXY(x, y)] = {
+  const placedTile = {
     uid: tile.uid,
     typeId: tile.typeId,
     rot: tile.rot,
     meeple: null,
-    start: false
+    start: false,
   };
-  if (RIVER_TILE_TYPES[tile.typeId]) advanceRiver(state, tile.typeId, tile.rot, x, y);
+  if (state.doubleGame) {
+    placedTile.doubleHalf = state.doublePhase === "first" ? 1 : 2;
+    if (state.doublePhase === "spring" || state.doublePhase === "secondRiver") {
+      placedTile.doubleRiver = true;
+    }
+  }
+  state.board[keyXY(x, y)] = placedTile;
+  if (tile.typeId === RIVER_SPRING_ID && state.doubleGame &&
+    state.doublePhase === "spring") {
+    const riverEdge = rotatedType(tile.typeId, tile.rot).edges.indexOf(RIVER);
+    state.riverOpenEnd = {
+      x: x + DIR_DELTA[riverEdge].x,
+      y: y + DIR_DELTA[riverEdge].y,
+      incomingEdge: OPPOSITE[riverEdge]
+    };
+    state.riverLastTurn = null;
+    state.riverDeck = state.futureRiverDeck;
+    state.futureRiverDeck = [];
+    state.doublePhase = "secondRiver";
+  } else if (RIVER_TILE_TYPES[tile.typeId]) {
+    advanceRiver(state, tile.typeId, tile.rot, x, y);
+  }
   state.currentTile = null;
   state.pending = null;
   state.selectedMeeple = null;
@@ -1146,7 +1394,11 @@ function confirmTurn(state, preserveUndo) {
       console.warn("Board has mismatched neighbouring tile edges:", edgeMismatches);
     }
   }
-  if (state.deck.length === 0) {
+  const doubleMidpoint = state.doubleGame &&
+    state.doublePhase === "first" && state.deck.length === 0;
+  const finalPileEmpty = state.deck.length === 0 &&
+    (!state.doubleGame || state.doublePhase === "second");
+  if (finalPileEmpty) {
     const endLogs = scoreUnfinishedFeatures(state, true).concat(scoreFarms(state));
     logs.push.apply(logs, endLogs);
     recordScoreChanges(state, scores);
@@ -1157,6 +1409,7 @@ function confirmTurn(state, preserveUndo) {
     persist(state);
     return true;
   }
+  if (doubleMidpoint) state.doublePhase = "spring";
   recordScoreChanges(state, scores);
   state.scoreLog = logs.length ? logs : ["No road, city, or monastery scored this turn."];
   state.current = (state.current + 1) % state.players.length;

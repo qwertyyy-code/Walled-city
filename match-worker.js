@@ -1,4 +1,4 @@
-importScripts("./tiles.js?v=44", "./game.js?v=44", "./bot.js?v=44");
+importScripts("./tiles.js?v=46", "./game.js?v=46", "./bot.js?v=46");
 
 function countBoardMeeples(state, playerIndex) {
   return Object.keys(state.board).reduce(function (total, key) {
@@ -9,7 +9,7 @@ function countBoardMeeples(state, playerIndex) {
 
 function opponentFeatureChances(state, playerIndex, settings) {
   const resolvedSettings = effectiveBotSettings(settings);
-  const tilesLeft = state.deck.length + state.riverDeck.length;
+  const tilesLeft = countTilesLeft(state);
   const completionCache = resolvedSettings.COMPLETION_MODEL === "pile"
     ? createPileCompletionCache(state)
     : null;
@@ -35,7 +35,7 @@ function opponentFeatureChances(state, playerIndex, settings) {
 function moveBlocksOpponentFeature(after, playerIndex, beforeFeatures, settings) {
   if (!beforeFeatures.some(function (feature) { return feature.chance > 0; })) return false;
   const resolvedSettings = effectiveBotSettings(settings);
-  const tilesLeft = after.deck.length + after.riverDeck.length;
+  const tilesLeft = countTilesLeft(after);
   const completionCache = resolvedSettings.COMPLETION_MODEL === "pile"
     ? createPileCompletionCache(after)
     : null;
@@ -52,13 +52,13 @@ function moveBlocksOpponentFeature(after, playerIndex, beforeFeatures, settings)
   });
 }
 
-function playGame(seed, riverEnabled, settingsByPlayer) {
+function playGame(seed, riverEnabled, settingsByPlayer, doubleGame) {
   const random = createSeededRandom(seed);
   setBotRandom(random);
   const players = PLAYER_COLORS.slice(0, settingsByPlayer.length).map(function (color) {
     return { name: color.name, color: color.hex, computer: true };
   });
-  const state = newGame(players, undefined, riverEnabled, random, true);
+  const state = newGame(players, undefined, riverEnabled, random, true, doubleGame);
   Object.defineProperty(state, "_botSimulation", { value: true });
   const startingMeeples = state.players.map(function (player) { return player.meeples; });
   const moveTimes = state.players.map(function () {
@@ -69,6 +69,8 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   const noMeepleTurnsByPlayer = state.players.map(function () { return 0; });
   const blockingMovesByPlayer = state.players.map(function () { return 0; });
   let meeplesInSupplyBeforeFinalScoring = null;
+  let meeplesAtFirstHalfEnd = null;
+  let meeplesAtSecondHalfEnd = null;
   let unfinishedFeatureMeeplesAtLastPlacement = state.players.map(function () {
     return { city: 0, road: 0, monastery: 0 };
   });
@@ -113,7 +115,11 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
       noMeepleTurns += 1;
       noMeepleTurnsByPlayer[current] += 1;
     }
-    if (state.deck.length === 0) {
+    const finalBaseTurn = state.deck.length === 0 &&
+      (!state.doubleGame || state.doublePhase === "second");
+    const firstHalfEndTurn = state.deck.length === 0 &&
+      state.doubleGame && state.doublePhase === "first";
+    if (finalBaseTurn || firstHalfEndTurn) {
       if (!lockPending(state)) throw new Error("Final tile placement could not be locked.");
       if (move.action) {
         if (!placeMeeple(state, move.action.spot.kind, move.action.spot.index)) {
@@ -141,12 +147,24 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
           });
         }
       });
-      meeplesInSupplyBeforeFinalScoring = supplyBeforeScoringCompletedFeatures.map(
-        function (count, playerIndex) {
-          return count + meeplesReturnedByCompletedFeatures[playerIndex];
+      if (finalBaseTurn) {
+        meeplesInSupplyBeforeFinalScoring = supplyBeforeScoringCompletedFeatures.map(
+          function (count, playerIndex) {
+            return count + meeplesReturnedByCompletedFeatures[playerIndex];
+          }
+        );
+        if (state.doubleGame) {
+          meeplesAtSecondHalfEnd = meeplesInSupplyBeforeFinalScoring.slice();
         }
-      );
-      if (!confirmTurn(state, false)) throw new Error("Final tile turn was rejected.");
+        if (!confirmTurn(state, false)) throw new Error("Final tile turn was rejected.");
+      } else {
+        if (!confirmTurn(state, false)) throw new Error("First-half final tile turn was rejected.");
+        if (firstHalfEndTurn) {
+          meeplesAtFirstHalfEnd = state.players.map(function (player) {
+            return player.meeples;
+          });
+        }
+      }
     } else if (!confirmPending(state, false)) {
       throw new Error("Turn " + turns + " was rejected.");
     }
@@ -191,6 +209,12 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     unfinishedFeatureMeeplesAtLastPlacement: unfinishedFeatureMeeplesAtLastPlacement,
     moveTimes: moveTimes,
     turns: turns,
+    doubleGame: state.doubleGame,
+    secondRiverFallbackCount: state.secondRiverFallbackCount,
+    secondRiverSkipCount: state.secondRiverSkipCount,
+    secondRiverDiscardCount: state.secondRiverDiscardCount,
+    meeplesAtFirstHalfEnd: meeplesAtFirstHalfEnd,
+    meeplesAtSecondHalfEnd: meeplesAtSecondHalfEnd,
     noMeepleTurns: noMeepleTurns,
     noMeepleTurnsByPlayer: noMeepleTurnsByPlayer,
     blockingMovesByPlayer: blockingMovesByPlayer,
@@ -209,7 +233,12 @@ self.onmessage = function (event) {
   try {
     self.postMessage({
       index: request.index,
-      result: playGame(request.seed, request.riverEnabled, request.settingsByPlayer)
+      result: playGame(
+        request.seed,
+        request.riverEnabled,
+        request.settingsByPlayer,
+        request.doubleGame
+      )
     });
   } catch (error) {
     self.postMessage({

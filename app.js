@@ -18,12 +18,15 @@ const ui = {
   newGameCancel: document.getElementById("btn-new-cancel"),
   newGameStart: document.getElementById("btn-new-start"),
   river: document.getElementById("river-option"),
+  doubleGame: document.getElementById("double-game-option"),
   riverScoringRule: document.getElementById("river-scoring-rule"),
   resume: document.getElementById("btn-resume"),
   board: document.getElementById("board"),
   preview: document.getElementById("preview"),
   hint: document.getElementById("hint"),
   turn: document.getElementById("turn-label"),
+  doubleBanner: document.getElementById("double-banner"),
+  handoffBanner: document.getElementById("handoff-banner"),
   left: document.getElementById("tiles-left"),
   meeples: document.getElementById("meeple-row"),
   rotate: document.getElementById("btn-rotate"),
@@ -108,6 +111,11 @@ ui.river.addEventListener("change", function () {
   localStorage.setItem(RIVER_CHOICE_KEY, String(ui.river.checked));
   ui.riverScoringRule.hidden = !ui.river.checked;
 });
+const DOUBLE_GAME_CHOICE_KEY = "walled-city-double-game-choice";
+ui.doubleGame.checked = localStorage.getItem(DOUBLE_GAME_CHOICE_KEY) === "true";
+ui.doubleGame.addEventListener("change", function () {
+  localStorage.setItem(DOUBLE_GAME_CHOICE_KEY, String(ui.doubleGame.checked));
+});
 
 document.getElementById("small-city-tile-limit").textContent = String(SMALL_CITY_MAX_TILES);
 document.getElementById("small-city-points").textContent =
@@ -148,6 +156,10 @@ const watchPlayerCount = Number.isInteger(requestedWatchPlayers) &&
   : 2;
 const riverQuery = query.get("river");
 if (riverQuery === "1" || riverQuery === "0") ui.river.checked = riverQuery === "1";
+const doubleGameQuery = query.get("double");
+if (doubleGameQuery === "1" || doubleGameQuery === "0") {
+  ui.doubleGame.checked = doubleGameQuery === "1";
+}
 const gameSeed = query.get("seed");
 const botMode = query.get("bot");
 const botModes = (query.get("bots") || "").split(",");
@@ -278,7 +290,8 @@ function startConfiguredGame(replaceSavedGame) {
     ui.river.checked,
     gameRandom,
     replaceSavedGame,
-    watch || autoplay
+    watch || autoplay,
+    ui.doubleGame.checked
   );
   if (!state) return;
   pushGameHistory();
@@ -487,6 +500,10 @@ function finishComputerTurn() {
 function goHandoff() {
   const p = state.players[state.current];
   ui.handoffTitle.textContent = p.name + "'s turn";
+  ui.handoffBanner.hidden = !state.doubleGame || state.doublePhase !== "spring";
+  if (!ui.handoffBanner.hidden) {
+    ui.handoffBanner.textContent = "Second river: " + p.name + " places the spring.";
+  }
   ui.handoffDot.style.background = p.color;
   renderScoreboard(ui.handoffScoreboard, false, state.current);
   updateCurrentPlayerHighlight(ui.playScoreboard, null, false);
@@ -543,7 +560,7 @@ function fitBoard() {
   const vw = ui.board.width / dpr;
   const vh = ui.board.height / dpr;
   const scale = Math.min(vw / (cellsW * cam.tile), vh / (cellsH * cam.tile), 1.35);
-  cam.scale = Math.max(0.35, scale) * dpr;
+  cam.scale = Math.max(0.08, scale) * dpr;
   const cx = (b.minX + b.maxX + 1) / 2 * cam.tile;
   const cy = (b.minY + b.maxY + 1) / 2 * cam.tile;
   cam.x = (vw / 2) * dpr - cx * cam.scale;
@@ -566,9 +583,32 @@ function refreshPlay() {
     ? "Finished board"
     : '<span class="dot" style="background:' + p.color + '"></span>' + p.name;
   if (computerActive) ui.turn.textContent = p.name + " is playing...";
-  ui.left.textContent = readOnly ? "Game finished" : state.riverOpenEnd
-    ? state.riverDeck.length + " river tiles · " + state.deck.length + " normal tiles left"
-    : state.deck.length + " tiles left";
+  ui.doubleBanner.hidden = !state.doubleGame || state.doublePhase !== "spring";
+  if (!ui.doubleBanner.hidden) {
+    ui.doubleBanner.textContent = "Second river: " + p.name + " places the spring.";
+  }
+  if (readOnly) {
+    ui.left.textContent = "Game finished";
+  } else if (!state.doubleGame) {
+    ui.left.textContent = state.riverOpenEnd
+      ? state.riverDeck.length + " river tiles · " + state.deck.length + " normal tiles left"
+      : state.deck.length + " tiles left";
+  } else if (state.doublePhase === "first" && state.riverOpenEnd) {
+    ui.left.textContent = state.riverDeck.length + " river tiles · " +
+      state.deck.length + " base tiles left (+" +
+      (12 + state.futureBaseDeck.length) + " after this half)";
+  } else if (state.doublePhase === "first") {
+    ui.left.textContent = state.deck.length + " left (+" +
+      (12 + state.futureBaseDeck.length) + " after the river)";
+  } else if (state.doublePhase === "spring") {
+    ui.left.textContent = state.futureRiverDeck.length + " river tiles left (+" +
+      state.futureBaseDeck.length + " after the river)";
+  } else if (state.doublePhase === "secondRiver") {
+    ui.left.textContent = state.riverDeck.length + " river tiles left (+" +
+      state.futureBaseDeck.length + " after the river)";
+  } else {
+    ui.left.textContent = state.deck.length + " tiles left";
+  }
   ui.meeples.innerHTML = "";
   state.players.forEach(function (pl, i) {
     const chip = document.createElement("div");
@@ -587,7 +627,11 @@ function refreshPlay() {
       ? state.selectedMeeple
         ? "Meeple selected. Tap it again to remove it, or Confirm to finish."
         : "Tap a meeple spot to select it, anywhere else on the tile to rotate."
-      : legal.length
+      : state.doubleGame && state.doublePhase === "spring"
+        ? legal.length
+          ? "Place the spring touching the board, with matching edges and its river side pointing to an empty cell."
+          : "No legal spring placement is available."
+        : legal.length
         ? "Tap a highlighted square to place the tile. Choose a meeple spot, then Confirm."
         : state.riverOpenEnd && RIVER_TILE_TYPES[state.currentTile.typeId]
           ? "River tiles must continue the open end."
@@ -808,7 +852,7 @@ function zoomAt(factor, cx, cy) {
   const dpr = window.devicePixelRatio || 1;
   const px = cx != null ? cx : ui.board.width / 2;
   const py = cy != null ? cy : ui.board.height / 2;
-  const next = Math.min(3.2 * dpr, Math.max(0.28 * dpr, cam.scale * factor));
+  const next = Math.min(3.2 * dpr, Math.max(0.08 * dpr, cam.scale * factor));
   const wx = (px - cam.x) / cam.scale;
   const wy = (py - cam.y) / cam.scale;
   cam.scale = next;
