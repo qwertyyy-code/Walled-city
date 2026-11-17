@@ -19,8 +19,8 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js?v=43"></script>
-  <script src="bot.js?v=43"></script>
+  <script src="game.js?v=44"></script>
+  <script src="bot.js?v=44"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -3387,7 +3387,7 @@
         }
 
         function createWorker(workerIndex) {
-          const worker = new Worker("./match-worker.js?v=43");
+          const worker = new Worker("./match-worker.js?v=44");
           workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -3935,21 +3935,20 @@
     test("bot setting overrides are scoped and preserve default weights", function () {
       const settingsA = effectiveBotSettings({ FARMER_WEIGHT_START: 0.5 });
       const settingsB = effectiveBotSettings({});
+      const scarcityOverride = effectiveBotSettings({ MEEPLE_SCARCITY: false });
       const classic = effectiveBotSettings(CLASSIC_SETTINGS);
       assertEqual(settingsB.COMPLETION_MODEL, "pile", "new defaults use the pile completion model");
       assertEqual(classic.COMPLETION_MODEL, "openSides", "classic preset keeps open-side completion");
       assertEqual(settingsA.FARMER_WEIGHT_START, 0.5, "A receives its farmer weight override");
       assertEqual(settingsB.FARMER_WEIGHT_START, 0.7, "B retains the default farmer weight");
       assertEqual(settingsB.MEEPLE_VALUE, 1.5, "B retains the default meeple value");
-      assertEqual(settingsB.MEEPLE_SCARCITY, false, "scarcity stays off by default");
+      assertEqual(settingsA.MEEPLE_SCARCITY, true, "A retains default scarcity alongside another override");
+      assertEqual(settingsB.MEEPLE_SCARCITY, true, "B retains default scarcity");
+      assertEqual(scarcityOverride.MEEPLE_SCARCITY, false, "A receives its scarcity override");
+      assertEqual(settingsB.MEEPLE_SCARCITY, true, "A's scarcity override does not change B");
       assertEqual(classic.FARMER_WEIGHT_START, 0.3, "classic preset keeps its farmer weight");
       assertEqual(classic.MEEPLE_VALUE, 3, "classic preset keeps its meeple value");
       assertEqual(classic.MEEPLE_SCARCITY, false, "classic preset keeps scarcity off");
-      assertEqual(
-        effectiveBotSettings({ MEEPLE_SCARCITY: true }).MEEPLE_SCARCITY,
-        true,
-        "scarcity can be enabled explicitly"
-      );
     });
 
     async function runComparisonChecks() {

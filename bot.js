@@ -56,7 +56,9 @@ function effectiveBotSettings(settings) {
       ? FARMER_WEIGHT_TRANSITION_PROGRESS
       : overrides.FARMER_WEIGHT_TRANSITION_PROGRESS,
     MEEPLE_VALUE: overrides.MEEPLE_VALUE === undefined ? MEEPLE_VALUE : overrides.MEEPLE_VALUE,
-    MEEPLE_SCARCITY: overrides.MEEPLE_SCARCITY === true,
+    MEEPLE_SCARCITY: overrides.MEEPLE_SCARCITY === undefined
+      ? true
+      : overrides.MEEPLE_SCARCITY === true,
     MEEPLE_ACTION_SHORTLIST_SIZE: overrides.MEEPLE_ACTION_SHORTLIST_SIZE === undefined
       ? MEEPLE_ACTION_SHORTLIST_SIZE
       : overrides.MEEPLE_ACTION_SHORTLIST_SIZE
