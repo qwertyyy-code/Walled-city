@@ -19,8 +19,8 @@
   <p id="summary" aria-live="polite"></p>
   <script src="tiles.js"></script>
   <script>window.__WALLED_CITY_TEST_SAVE_KEY__ = "walled-city-test-save";</script>
-  <script src="game.js?v=42"></script>
-  <script src="bot.js?v=42"></script>
+  <script src="game.js?v=43"></script>
+  <script src="bot.js?v=43"></script>
   <script src="render.js"></script>
   <script>
     const results = document.getElementById("results");
@@ -2556,6 +2556,81 @@
       assertEqual(simulated.players[1].score, 0, "neutral move scores no points for opponent");
     });
 
+    test("meeple scarcity saves the last meeple but spends one when supply is plentiful", function () {
+      function scarcityPosition(supply) {
+        const state = testState();
+        state.players[0].meeples = supply;
+        put(state, 0, 0, "D", 0);
+        state.board["0,0"].start = true;
+        state.current = 0;
+        state.phase = "place";
+        state.currentTile = { uid: "scarcity-U", typeId: "U", rot: 0 };
+        state.deck = Array.from({ length: 50 }, function (_, index) {
+          return { uid: "scarcity-remaining-" + index, typeId: "B" };
+        });
+        return state;
+      }
+
+      const settings = effectiveBotSettings({ MEEPLE_SCARCITY: true });
+      function scoreParts(state, move) {
+        const neutralMove = Object.assign({}, move, { action: null });
+        const claimMove = Object.assign({}, move, { action: plentifulMove.action });
+        const tilesAtStart = countTilesAtStart(state);
+        const simulated = simulatedTurn(state, 0, claimMove);
+        const tilesLeft = simulated.deck.length + simulated.riverDeck.length;
+        const road = allFeatures(simulated).filter(function (feature) {
+          return feature.kind === "road" && feature.nodes.some(function (node) {
+            return node.x === move.x && node.y === move.y;
+          });
+        })[0];
+        const roadEndValue = road ? featurePoints(simulated, road, false) : 0;
+        const roadValue = road
+          ? roadEndValue + completionChance(
+            simulated, road, tilesLeft, settings
+          ) * (featurePoints(simulated, road, true) - roadEndValue)
+          : 0;
+        const supplyValue = settings.MEEPLE_VALUE *
+          Array.from({ length: state.players[0].meeples }).reduce(function (sum, _, index) {
+            return sum + Math.max(1, 4 - index);
+          }, 0) *
+          (tilesAtStart > 0 ? tilesLeft / tilesAtStart : 0);
+        const neutralScore = scoreMove(state, 0, neutralMove, tilesAtStart, settings);
+        const claimScore = scoreMove(state, 0, claimMove, tilesAtStart, settings);
+        return {
+          neutralPlacementScore: neutralScore,
+          meeplePlacementScore: claimScore,
+          meeplePlacementAdvantage: claimScore - neutralScore,
+          meepleSupplyValue: supplyValue,
+          roadValue: roadValue
+        };
+      }
+
+      const scarceState = scarcityPosition(1);
+      setBotRandom(createSeededRandom("scarcity-position"));
+      const scarceMove = chooseMove(scarceState, 0, "smart", settings);
+      const plentifulState = scarcityPosition(6);
+      setBotRandom(createSeededRandom("scarcity-position"));
+      const plentifulMove = chooseMove(plentifulState, 0, "smart", settings);
+      const scarceScoreParts = scoreParts(scarceState, scarceMove);
+      const plentifulScoreParts = scoreParts(plentifulState, plentifulMove);
+      assertEqual(scarceMove.action, null, "one meeple remains in supply");
+      assertEqual(!!plentifulMove.action, true, "six meeples allow the road claim");
+      assertEqual(
+        scarceMove.x === plentifulMove.x && scarceMove.y === plentifulMove.y &&
+          scarceMove.rotation === plentifulMove.rotation,
+        true,
+        "both supplies choose the same short-road placement"
+      );
+      assertEqual(scarceScoreParts.meeplePlacementAdvantage < 0, true,
+        "claiming loses more than the road is worth with one meeple");
+      assertEqual(plentifulScoreParts.meeplePlacementAdvantage > 0, true,
+        "claiming is worthwhile with six meeples");
+      return JSON.stringify({
+        oneMeepleLeft: scarceScoreParts,
+        sixMeeplesLeft: plentifulScoreParts
+      });
+    });
+
     test("random bot mode remains available and uses the action move shape", function () {
       const random = createSeededRandom("random-mode");
       setBotRandom(random);
@@ -3312,7 +3387,7 @@
         }
 
         function createWorker(workerIndex) {
-          const worker = new Worker("./match-worker.js?v=42");
+          const worker = new Worker("./match-worker.js?v=43");
           workers[workerIndex] = worker;
           worker.onmessage = function (event) {
             if (event.data.error) {
@@ -3438,6 +3513,24 @@
             meeplesLeftInSupply: seats.reduce(function (sum, seat) {
               return sum + result.meeplesInSupply[seat];
             }, 0) / seats.length,
+            meeplesAtTurns: [5, 10, 15, 20, 25, 30].reduce(function (turns, turn) {
+              turns[turn] = seats.reduce(function (sum, seat) {
+                return sum + (result.meeplesAtTurnsByPlayer[seat][turn] || 0);
+              }, 0) / seats.length;
+              return turns;
+            }, {}),
+            zeroMeepleSupplyTurns: seats.reduce(function (sum, seat) {
+              return sum + result.zeroMeepleSupplyTurnsByPlayer[seat];
+            }, 0),
+            unfinishedFeatureMeeples: ["city", "road", "monastery"].reduce(
+              function (features, kind) {
+                features[kind] = seats.reduce(function (sum, seat) {
+                  return sum + result.unfinishedFeatureMeeplesAtLastPlacement[seat][kind];
+                }, 0) / seats.length;
+                return features;
+              },
+              {}
+            ),
             farmersPlaced: seats.reduce(function (sum, seat) {
               return sum + result.farmers[seat];
             }, 0) / seats.length,
@@ -3550,6 +3643,12 @@
           averageMoveTimeMs: { A: 0, B: 0 },
           slowestMoveTimeMs: { A: 0, B: 0 },
           averageMeeplesLeftInSupply: { A: 0, B: 0 },
+          averageMeeplesInSupplyAtOwnTurns: { A: {}, B: {} },
+          shareTurnsWithZeroMeeplesInSupply: { A: 0, B: 0 },
+          averageUnfinishedFeatureMeeplesAtLastPlacement: {
+            A: { city: 0, road: 0, monastery: 0 },
+            B: { city: 0, road: 0, monastery: 0 }
+          },
           averageFarmersPlaced: { A: 0, B: 0 },
           averageFarmPoints: { A: 0, B: 0 },
           averageBlockingMovesPerGame: { A: 0, B: 0 },
@@ -3560,8 +3659,18 @@
           B: { totalMs: 0, count: 0 }
         };
         const playTotals = {
-          A: { meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0, noMeepleTurns: 0, turns: 0 },
-          B: { meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0, noMeepleTurns: 0, turns: 0 }
+          A: {
+            meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0,
+            noMeepleTurns: 0, zeroMeepleSupplyTurns: 0, turns: 0,
+            meeplesAtTurns: { 5: 0, 10: 0, 15: 0, 20: 0, 25: 0, 30: 0 },
+            unfinishedFeatureMeeples: { city: 0, road: 0, monastery: 0 }
+          },
+          B: {
+            meeples: 0, farmers: 0, farmPoints: 0, blockingMoves: 0,
+            noMeepleTurns: 0, zeroMeepleSupplyTurns: 0, turns: 0,
+            meeplesAtTurns: { 5: 0, 10: 0, 15: 0, 20: 0, 25: 0, 30: 0 },
+            unfinishedFeatureMeeples: { city: 0, road: 0, monastery: 0 }
+          }
         };
         let scoreATotal = 0;
         let scoreBTotal = 0;
@@ -3587,7 +3696,14 @@
             totals.farmPoints += stats.farmPoints;
             totals.blockingMoves += stats.blockingMoves;
             totals.noMeepleTurns += stats.noMeepleTurns;
+            totals.zeroMeepleSupplyTurns += stats.zeroMeepleSupplyTurns;
             totals.turns += stats.turns;
+            Object.keys(totals.meeplesAtTurns).forEach(function (turn) {
+              totals.meeplesAtTurns[turn] += stats.meeplesAtTurns[turn];
+            });
+            Object.keys(totals.unfinishedFeatureMeeples).forEach(function (kind) {
+              totals.unfinishedFeatureMeeples[kind] += stats.unfinishedFeatureMeeples[kind];
+            });
           });
         });
         ["A", "B"].forEach(function (label) {
@@ -3597,6 +3713,20 @@
           summary.averageMeeplesLeftInSupply[label] = gameIndexes.length
             ? playTotals[label].meeples / gameIndexes.length
             : 0;
+          Object.keys(playTotals[label].meeplesAtTurns).forEach(function (turn) {
+            summary.averageMeeplesInSupplyAtOwnTurns[label][turn] = gameIndexes.length
+              ? playTotals[label].meeplesAtTurns[turn] / gameIndexes.length
+              : 0;
+          });
+          summary.shareTurnsWithZeroMeeplesInSupply[label] = playTotals[label].turns
+            ? playTotals[label].zeroMeepleSupplyTurns / playTotals[label].turns
+            : 0;
+          Object.keys(playTotals[label].unfinishedFeatureMeeples).forEach(function (kind) {
+            summary.averageUnfinishedFeatureMeeplesAtLastPlacement[label][kind] =
+              gameIndexes.length
+                ? playTotals[label].unfinishedFeatureMeeples[kind] / gameIndexes.length
+                : 0;
+          });
           summary.averageFarmersPlaced[label] = gameIndexes.length
             ? playTotals[label].farmers / gameIndexes.length
             : 0;
@@ -3811,8 +3941,15 @@
       assertEqual(settingsA.FARMER_WEIGHT_START, 0.5, "A receives its farmer weight override");
       assertEqual(settingsB.FARMER_WEIGHT_START, 0.7, "B retains the default farmer weight");
       assertEqual(settingsB.MEEPLE_VALUE, 1.5, "B retains the default meeple value");
+      assertEqual(settingsB.MEEPLE_SCARCITY, false, "scarcity stays off by default");
       assertEqual(classic.FARMER_WEIGHT_START, 0.3, "classic preset keeps its farmer weight");
       assertEqual(classic.MEEPLE_VALUE, 3, "classic preset keeps its meeple value");
+      assertEqual(classic.MEEPLE_SCARCITY, false, "classic preset keeps scarcity off");
+      assertEqual(
+        effectiveBotSettings({ MEEPLE_SCARCITY: true }).MEEPLE_SCARCITY,
+        true,
+        "scarcity can be enabled explicitly"
+      );
     });
 
     async function runComparisonChecks() {
@@ -4041,6 +4178,56 @@
             slowestMoveTimeMs: speedRun.slowestMoveTimeMs,
             durationMs: speedRun.durationMs
           }
+        });
+      });
+    }
+
+    if (new URLSearchParams(window.location.search).get("reports") === "step66") {
+      await testAsync("report-only meeple scarcity comparison on seeds 701–800", async function () {
+        const seeds701To800 = Array.from({ length: 100 }, function (_, index) {
+          return index + 701;
+        });
+        const comparison = await runMatch(
+          { MEEPLE_SCARCITY: false },
+          { MEEPLE_SCARCITY: true },
+          seeds701To800.length,
+          { paired: true, seeds: seeds701To800 }
+        );
+        assertEqual(comparison.failedGames.length, 0,
+          "all comparison games complete: " + JSON.stringify(comparison.failedGames));
+        function section(result) {
+          return {
+            games: result.games,
+            pairs: result.pairCount,
+            averageScoreDifferenceAminusB: result.averageScoreDifferenceAminusB,
+            scoreDifferenceConfidenceRange: result.scoreDifferenceConfidenceRange,
+            winsA: result.winsA,
+            winsB: result.winsB,
+            draws: result.draws,
+            pairsAWinBoth: result.pairsAWinBoth,
+            pairsBWinBoth: result.pairsBWinBoth,
+            pairsSplit: result.pairsSplit,
+            pairsWithDraw: result.pairsWithDraw,
+            averageScoreA: result.averageScoreA,
+            averageScoreB: result.averageScoreB,
+            averageMoveTimeMs: result.averageMoveTimeMs,
+            slowestMoveTimeMs: result.slowestMoveTimeMs,
+            averageMeeplesLeftInSupply: result.averageMeeplesLeftInSupply,
+            averageMeeplesInSupplyAtOwnTurns: result.averageMeeplesInSupplyAtOwnTurns,
+            shareTurnsWithZeroMeeplesInSupply: result.shareTurnsWithZeroMeeplesInSupply,
+            averageUnfinishedFeatureMeeplesAtLastPlacement:
+              result.averageUnfinishedFeatureMeeplesAtLastPlacement,
+            averageFarmersPlaced: result.averageFarmersPlaced,
+            averageFarmPoints: result.averageFarmPoints,
+            averageBlockingMovesPerGame: result.averageBlockingMovesPerGame,
+            shareTurnsWithoutMeeple: result.shareTurnsWithoutMeeple
+          };
+        }
+        return JSON.stringify({
+          all: section(comparison),
+          riverOn: section(comparison.byRiver.on),
+          riverOff: section(comparison.byRiver.off),
+          durationMs: comparison.durationMs
         });
       });
     }

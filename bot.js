@@ -16,7 +16,8 @@ const COMPLETION_TILE_WINDOW = 15;
 const CLASSIC_SETTINGS = {
   COMPLETION_MODEL: "openSides",
   FARMER_WEIGHT_START: 0.3,
-  MEEPLE_VALUE: 3
+  MEEPLE_VALUE: 3,
+  MEEPLE_SCARCITY: false
 };
 const FARMER_WEIGHT = { early: 0.7, late: 1.0 };
 const FARMER_WEIGHT_TRANSITION_PROGRESS = 0.5;
@@ -55,6 +56,7 @@ function effectiveBotSettings(settings) {
       ? FARMER_WEIGHT_TRANSITION_PROGRESS
       : overrides.FARMER_WEIGHT_TRANSITION_PROGRESS,
     MEEPLE_VALUE: overrides.MEEPLE_VALUE === undefined ? MEEPLE_VALUE : overrides.MEEPLE_VALUE,
+    MEEPLE_SCARCITY: overrides.MEEPLE_SCARCITY === true,
     MEEPLE_ACTION_SHORTLIST_SIZE: overrides.MEEPLE_ACTION_SHORTLIST_SIZE === undefined
       ? MEEPLE_ACTION_SHORTLIST_SIZE
       : overrides.MEEPLE_ACTION_SHORTLIST_SIZE
@@ -407,7 +409,14 @@ function playerValues(game, tilesLeft, tilesAtStart, settings) {
       }
     });
 
-    value += settings.MEEPLE_VALUE * player.meeples *
+    let meeplesInSupply = player.meeples;
+    if (settings.MEEPLE_SCARCITY) {
+      meeplesInSupply = 0;
+      for (let meepleIndex = 0; meepleIndex < player.meeples; meepleIndex++) {
+        meeplesInSupply += Math.max(1, 4 - meepleIndex);
+      }
+    }
+    value += settings.MEEPLE_VALUE * meeplesInSupply *
       (tilesAtStart > 0 ? tilesLeft / tilesAtStart : 0);
     return value;
   });

@@ -1,4 +1,4 @@
-importScripts("./tiles.js?v=42", "./game.js?v=42", "./bot.js?v=42");
+importScripts("./tiles.js?v=43", "./game.js?v=43", "./bot.js?v=43");
 
 function countBoardMeeples(state, playerIndex) {
   return Object.keys(state.board).reduce(function (total, key) {
@@ -64,14 +64,27 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   const moveTimes = state.players.map(function () {
     return { totalMs: 0, count: 0, slowestMs: 0 };
   });
+  const meeplesAtTurnsByPlayer = state.players.map(function () { return {}; });
+  const zeroMeepleSupplyTurnsByPlayer = state.players.map(function () { return 0; });
   const noMeepleTurnsByPlayer = state.players.map(function () { return 0; });
   const blockingMovesByPlayer = state.players.map(function () { return 0; });
+  let meeplesInSupplyBeforeFinalScoring = null;
+  let unfinishedFeatureMeeplesAtLastPlacement = state.players.map(function () {
+    return { city: 0, road: 0, monastery: 0 };
+  });
   let turns = 0;
   let noMeepleTurns = 0;
   while (!state.gameOver && turns < 200) {
     beginTurn(state);
     if (state.gameOver) break;
     const current = state.current;
+    const ownTurn = moveTimes[current].count + 1;
+    if ([5, 10, 15, 20, 25, 30].indexOf(ownTurn) >= 0) {
+      meeplesAtTurnsByPlayer[current][ownTurn] = state.players[current].meeples;
+    }
+    if (state.players[current].meeples === 0) {
+      zeroMeepleSupplyTurnsByPlayer[current] += 1;
+    }
     const scores = state.players.map(function (player) { return player.score; });
     const blockingSettings = settingsByPlayer[current];
     const opponentFeaturesBefore = opponentFeatureChances(state, current, blockingSettings);
@@ -100,7 +113,43 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
       noMeepleTurns += 1;
       noMeepleTurnsByPlayer[current] += 1;
     }
-    if (!confirmPending(state, false)) throw new Error("Turn " + turns + " was rejected.");
+    if (state.deck.length === 0) {
+      if (!lockPending(state)) throw new Error("Final tile placement could not be locked.");
+      if (move.action) {
+        if (!placeMeeple(state, move.action.spot.kind, move.action.spot.index)) {
+          throw new Error("Final tile meeple placement was rejected.");
+        }
+      } else {
+        chooseNoMeeple(state);
+      }
+      const supplyBeforeScoringCompletedFeatures = state.players.map(function (player) {
+        return player.meeples;
+      });
+      const meeplesReturnedByCompletedFeatures = state.players.map(function () { return 0; });
+      unfinishedFeatureMeeplesAtLastPlacement = state.players.map(function () {
+        return { city: 0, road: 0, monastery: 0 };
+      });
+      allFeatures(state).forEach(function (feature) {
+        const counts = featureMeeples(state, feature);
+        if (featureComplete(state, feature)) {
+          counts.forEach(function (count, playerIndex) {
+            meeplesReturnedByCompletedFeatures[playerIndex] += count;
+          });
+        } else if (["city", "road", "monastery"].indexOf(feature.kind) >= 0) {
+          counts.forEach(function (count, playerIndex) {
+            unfinishedFeatureMeeplesAtLastPlacement[playerIndex][feature.kind] += count;
+          });
+        }
+      });
+      meeplesInSupplyBeforeFinalScoring = supplyBeforeScoringCompletedFeatures.map(
+        function (count, playerIndex) {
+          return count + meeplesReturnedByCompletedFeatures[playerIndex];
+        }
+      );
+      if (!confirmTurn(state, false)) throw new Error("Final tile turn was rejected.");
+    } else if (!confirmPending(state, false)) {
+      throw new Error("Turn " + turns + " was rejected.");
+    }
     if (moveBlocksOpponentFeature(state, current, opponentFeaturesBefore, blockingSettings)) {
       blockingMovesByPlayer[current] += 1;
     }
@@ -117,9 +166,29 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
   if (!state.gameOver) throw new Error("Game did not finish within 200 turns.");
   if (validateBoard(state).length) throw new Error("Finished board is invalid.");
 
+  const meeplesInSupply = meeplesInSupplyBeforeFinalScoring || state.players.map(function (player) {
+    return player.meeples;
+  });
+  const farmers = state.players.map(function (_, index) {
+    return Object.keys(state.board).reduce(function (total, key) {
+      const placed = state.board[key].meeple;
+      return total + (placed && placed.player === index && placed.kind === "field" ? 1 : 0);
+    }, 0);
+  });
+  state.players.forEach(function (_, index) {
+    const unfinishedMeeples = unfinishedFeatureMeeplesAtLastPlacement[index];
+    if (meeplesInSupply[index] + farmers[index] + unfinishedMeeples.city +
+      unfinishedMeeples.road + unfinishedMeeples.monastery !== startingMeeples[index]) {
+      throw new Error("Pre-final-scoring meeple total changed for seat " + index + ".");
+    }
+  });
+
   return {
     scores: state.players.map(function (player) { return player.score; }),
-    meeplesInSupply: state.players.map(function (player) { return player.meeples; }),
+    meeplesInSupply: meeplesInSupply,
+    meeplesAtTurnsByPlayer: meeplesAtTurnsByPlayer,
+    zeroMeepleSupplyTurnsByPlayer: zeroMeepleSupplyTurnsByPlayer,
+    unfinishedFeatureMeeplesAtLastPlacement: unfinishedFeatureMeeplesAtLastPlacement,
     moveTimes: moveTimes,
     turns: turns,
     noMeepleTurns: noMeepleTurns,
@@ -131,12 +200,7 @@ function playGame(seed, riverEnabled, settingsByPlayer) {
     completedCities: allFeatures(state).filter(function (feature) {
       return feature.kind === "city" && featureComplete(state, feature);
     }).length,
-    farmers: state.players.map(function (_, index) {
-      return Object.keys(state.board).reduce(function (total, key) {
-        const placed = state.board[key].meeple;
-        return total + (placed && placed.player === index && placed.kind === "field" ? 1 : 0);
-      }, 0);
-    })
+    farmers: farmers
   };
 }
 
